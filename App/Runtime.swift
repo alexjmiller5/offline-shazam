@@ -23,7 +23,6 @@ enum Runtime {
         let controller = CaptureController(store: store, delivery: delivery,
                                            recordAudio: { try await recorder.capture() },
                                            recognize: { try await ShazamMatcher().match($0) })
-        delivery.onChange = { [weak controller] in controller?.refresh() }
         return controller
     }
 }

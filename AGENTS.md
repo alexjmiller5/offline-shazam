@@ -20,6 +20,7 @@ Device signing and installation use caller-supplied `IOS_TEAM_ID`, `IOS_PROFILE`
 - Persist a match before enqueueing a file-backed background URLSession upload. Reuse matched metadata on delivery retries.
 - Display and enqueue each match before slower backlog recognition. Current online identification and upload must not wait for a future invocation.
 - Mark delivered only after a valid response confirms the same capture UUID and recording. Retain all unfinished work through network, auth, and malformed-response failures.
+- Show missing connection, active upload, scheduled retry, and confirmed delivery separately. Saving a connection enqueues matched captures immediately. Retry persisted deadlines with one timer while the app can run, honoring Retry-After and a 30-second minimum; authentication failures pause until Settings repairs the connection.
 - Reattach the background URLSession on OS relaunch and finish the OS callback after persistence.
 
 ## Ownership and configuration

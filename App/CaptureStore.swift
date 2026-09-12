@@ -20,6 +20,7 @@ final class CaptureRecord {
     var lastError: String?
     var nextAttemptAt: Date?
     var lastAttemptAt: Date?
+    var deliveryBlocked: Bool = false
 
     var state: CaptureState {
         get { CaptureState(rawValue: stateValue) ?? .pending }
@@ -94,10 +95,12 @@ final class CaptureStore {
         record.state = .matched
         record.lastError = nil
         record.nextAttemptAt = nil
+        record.deliveryBlocked = false
         try save()
     }
 
-    func deliveryFinished(_ record: CaptureRecord, status: Int, data: Data, retryAfter: String? = nil, now: Date = Date()) throws {
+    func deliveryFinished(_ record: CaptureRecord, status: Int, data: Data, retryAfter: String? = nil,
+                          now: Date = Date(), retryDelay: TimeInterval = 30) throws {
         guard record.state == .matched else { return }
         struct Receipt: Decodable {
             let ok: Bool
@@ -112,22 +115,27 @@ final class CaptureStore {
             record.state = .delivered
             record.lastError = nil
             record.nextAttemptAt = nil
+            record.deliveryBlocked = false
         } else {
-            record.lastError = (status == 401 || status == 403)
+            record.deliveryBlocked = status == 401 || status == 403
+            record.lastError = record.deliveryBlocked
                 ? "Connection needs attention in Settings."
                 : "Delivery not confirmed. Saved for another attempt."
-            record.nextAttemptAt = now.addingTimeInterval(30)
+            record.nextAttemptAt = now.addingTimeInterval(retryDelay)
             if let retryAfter {
                 if let seconds = Double(retryAfter), seconds.isFinite, seconds >= 0 {
-                    record.nextAttemptAt = now.addingTimeInterval(seconds)
+                    record.nextAttemptAt = now.addingTimeInterval(max(retryDelay, seconds))
                 } else {
                     let format = DateFormatter()
                     format.locale = Locale(identifier: "en_US_POSIX")
                     format.timeZone = TimeZone(secondsFromGMT: 0)
                     format.dateFormat = "EEE, dd MMM yyyy HH:mm:ss z"
-                    if let date = format.date(from: retryAfter), date > now { record.nextAttemptAt = date }
+                    if let date = format.date(from: retryAfter) {
+                        record.nextAttemptAt = max(now.addingTimeInterval(retryDelay), date)
+                    }
                 }
             }
+            if record.deliveryBlocked { record.nextAttemptAt = nil }
         }
         try save()
         if record.state == .delivered {

@@ -6,7 +6,7 @@ Identify music on an iPhone as you listen with Apple's ShazamKit. Offline captur
 
 1. Open Settings and enter the Music Sync capture URL and a capture-only access token. The connection is stored in the iOS Keychain.
 2. Tap **Capture song**, or use the **Capture song** App Shortcut. Shazam listens and stops recording as soon as it identifies the song. If there is no early match, the app saves up to 15 seconds as a Shazam signature for identification.
-3. Check recent captures for their status: saved, identified, added to Spotify, or not identified. There is no manual sync step.
+3. Check recent captures for their status: saved for identification, needs connection, sending, retrying, or confirmed **Added to Spotify**. There is no manual sync step. Saving a connection automatically starts delivery of already identified songs.
 
 The capture Shortcut opens the app to use the microphone. For an existing audio-recording Shortcut, add the **Save audio capture** action after **Record Audio**, passing its audio output. Clips must be at most 30 seconds and 16 MiB. This action waits for signature persistence and a bounded recognition pass before returning; it does not launch detached recognition work.
 
@@ -36,8 +36,8 @@ Allow microphone access on the phone when prompted. On a replacement phone, rein
 
 Music Sync owns the capture API, Spotify account connection, revocable client tokens, and durable delivery receipts. Offline Shazam knows only its HTTPS capture endpoint and its own issued bearer token. It carries no Spotify, Modal, R2, or infrastructure credentials.
 
-A request contains `capture_id` (stable UUID), `title`, `artist`, `apple_music_id`, and `shazam_url`, with optional `isrc`. Success requires a 2xx response with `ok: true`, the same capture UUID, and a nonempty recording ISRC. If Shazam supplied an ISRC, the receipt must agree. Other responses retain the matched metadata for retry; numeric or HTTP-date `Retry-After` is respected. Request redirects are rejected. The server durably pins the selected recording before Spotify side effects and deduplicates repeat requests.
+A request contains `capture_id` (stable UUID), `title`, `artist`, `apple_music_id`, and `shazam_url`, with optional `isrc`. Success requires a 2xx response with `ok: true`, the same capture UUID, and a nonempty recording ISRC. If Shazam supplied an ISRC, the receipt must agree. Only that acknowledgment produces the green **Added to Spotify** status. Other responses retain the matched metadata for automatic retry; numeric or HTTP-date `Retry-After` is respected, with a minimum 30-second delay. A single timer wakes the next retry while the app can run, and app activation resumes persisted deadlines. Missing or rejected credentials pause delivery until the connection is saved in Settings. Native background uploads can continue while the app is suspended; iOS controls that execution, and reopening the app resumes unfinished work. Request redirects are rejected. The server durably pins the selected recording before Spotify side effects and deduplicates repeat requests.
 
 Signatures and queue metadata stay in the app's Application Support directory. Live microphone audio is processed in memory; temporary import files are removed after processing. Successful delivery removes the signature while retaining recent song history. Unidentified recordings remain visible and retained. There is no analytics SDK.
 
-The waveform icon is [Tabler wave-sine](https://icon-sets.iconify.design/tabler/wave-sine/), used under the MIT license.
+The waveform and status icons are from [Tabler](https://icon-sets.iconify.design/tabler/), delivered through Iconify and used under the MIT license.

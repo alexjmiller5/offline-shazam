@@ -1,6 +1,7 @@
 # Third-party notices
 
-The waveform artwork is derived from the Tabler Icons wave-sine icon.
+The waveform and status artwork use the Tabler Icons wave-sine, circle-check,
+clock, and alert-circle icons, obtained through Iconify.
 Source: https://github.com/tabler/tabler-icons
 
 MIT License

@@ -13,6 +13,8 @@ final class CaptureController {
     var isProcessing = false
     var records: [CaptureRecord] = []
     var status: String?
+    var connectionIssue: String?
+    var uploadingIDs: Set<UUID> = []
     @ObservationIgnored private var processingTask: Task<Void, Never>?
     @ObservationIgnored private var processingID: UUID?
 
@@ -23,6 +25,7 @@ final class CaptureController {
         self.delivery = delivery
         self.recordAudio = recordAudio
         processor = CaptureProcessor(store: store, recognize: recognize)
+        delivery.onChange = { [weak self] in self?.refresh() }
         refresh()
     }
 
@@ -56,6 +59,8 @@ final class CaptureController {
     }
 
     func refresh() {
+        connectionIssue = delivery.connectionIssue
+        uploadingIDs = delivery.uploadingIDs
         do { records = try store.records() }
         catch { status = "Could not read saved captures. Reopen the app to try again." }
     }

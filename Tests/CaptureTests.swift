@@ -1,10 +1,54 @@
 import AVFoundation
 import ShazamKit
+import SwiftData
 import XCTest
 @testable import OfflineShazam
 
 @MainActor
 final class CaptureTests: XCTestCase {
+    func testExistingQueueMigratesWithoutLosingMatchedSongOrRetryDeadline() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let id = UUID()
+        let deadline = Date(timeIntervalSince1970: 2000)
+        do {
+            let container = try ModelContainer(for: OriginalCaptureSchema.CaptureRecord.self,
+                configurations: ModelConfiguration(url: directory.appendingPathComponent("queue.sqlite")))
+            let context = ModelContext(container)
+            let record = OriginalCaptureSchema.CaptureRecord(id: id)
+            record.title = "Example Song"
+            record.artist = "Example Artist"
+            record.isrc = "XX0000000001"
+            record.nextAttemptAt = deadline
+            context.insert(record)
+            try context.save()
+        }
+        let reopened = try CaptureStore(directory: directory)
+        let record = try XCTUnwrap(reopened.records().first)
+        XCTAssertEqual(record.id, id)
+        XCTAssertEqual(record.metadata?.title, "Example Song")
+        XCTAssertEqual(record.metadata?.isrc, "XX0000000001")
+        XCTAssertEqual(record.state, .matched)
+        XCTAssertEqual(record.nextAttemptAt, deadline)
+        XCTAssertFalse(record.deliveryBlocked)
+    }
+
+    func testRetryAfterCannotCauseAnImmediateFailureLoop() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CaptureStore(directory: directory)
+        let record = try store.capture(signature: makeSignature())
+        try store.matched(record, metadata: MatchMetadata(title: "Example Song", artist: "Example Artist"))
+        let now = Date(timeIntervalSince1970: 1000)
+        for retryAfter in ["0", "-1", "nan", "inf", "bad", "Thu, 01 Jan 1970 00:00:00 GMT"] {
+            try store.deliveryFinished(record, status: 503, data: Data(), retryAfter: retryAfter, now: now)
+            XCTAssertEqual(record.nextAttemptAt, Date(timeIntervalSince1970: 1030))
+        }
+        try store.deliveryFinished(record, status: 429, data: Data(), retryAfter: "Thu, 01 Jan 1970 00:20:00 GMT", now: now)
+        XCTAssertEqual(record.nextAttemptAt, Date(timeIntervalSince1970: 1200))
+    }
+
     func testOfflineCaptureSurvivesReopeningWithOriginalSignature() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -135,5 +179,30 @@ final class CaptureTests: XCTestCase {
         let generator = SHSignatureGenerator()
         try generator.append(buffer, at: nil)
         return generator.signature()
+    }
+}
+
+// The previously shipped model, kept here only to exercise native lightweight migration.
+private enum OriginalCaptureSchema {
+    @Model
+    final class CaptureRecord {
+        @Attribute(.unique) var id: UUID
+        var createdAt: Date
+        var stateValue: String
+        var title: String?
+        var artist: String?
+        var appleMusicID: String?
+        var shazamURL: String?
+        var appleMusicURL: String?
+        var isrc: String?
+        var lastError: String?
+        var nextAttemptAt: Date?
+        var lastAttemptAt: Date?
+
+        init(id: UUID) {
+            self.id = id
+            createdAt = Date()
+            stateValue = "matched"
+        }
     }
 }

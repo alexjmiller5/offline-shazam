@@ -18,6 +18,22 @@ struct ContentView: View {
                     }
                     .padding(.top, 24)
 
+                    if let issue = controller.connectionIssue {
+                        Button { showingSettings = true } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image("AlertCircle").resizable().frame(width: 24, height: 24).foregroundStyle(.orange)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Spotify delivery needs attention").font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                                    Text(issue).font(.footnote).foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(16)
+                            .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     Button {
                         Task {
                             do { _ = try await controller.capture(); error = nil }
@@ -68,7 +84,10 @@ struct ContentView: View {
                                 if pending > 0 { Text("\(pending) pending").font(.caption).foregroundStyle(.secondary) }
                             }
                             ForEach(controller.records.reversed()) { record in
-                                CaptureRow(record: record)
+                                CaptureRow(record: record,
+                                           isUploading: controller.uploadingIDs.contains(record.id),
+                                           connectionIssue: controller.connectionIssue,
+                                           isOnline: controller.isOnline)
                                 if record.id != controller.records.first?.id { Divider() }
                             }
                         }
@@ -103,18 +122,34 @@ struct ContentView: View {
 
 private struct CaptureRow: View {
     let record: CaptureRecord
+    let isUploading: Bool
+    let connectionIssue: String?
+    let isOnline: Bool
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(record.title ?? "Saved capture").font(.headline)
             if let artist = record.artist { Text(artist).foregroundStyle(.secondary) }
             HStack {
-                Text(label).foregroundStyle(record.state == .delivered ? Color.green : Color.secondary)
+                HStack(spacing: 6) {
+                    if record.state == .matched, isUploading, connectionIssue == nil {
+                        ProgressView().controlSize(.mini).tint(color)
+                    } else {
+                        Image(icon).resizable().frame(width: 16, height: 16)
+                    }
+                    Text(label).fontWeight(.medium)
+                }
+                .foregroundStyle(color)
+                .padding(.horizontal, 9).padding(.vertical, 6)
+                .background(color.opacity(0.1), in: Capsule())
                 Spacer()
                 Text(record.createdAt, format: .dateTime.month(.abbreviated).day().hour().minute())
                     .foregroundStyle(.tertiary)
             }
             .font(.caption)
-            if let message = record.lastError { Text(message).font(.caption).foregroundStyle(.secondary) }
+            if let message = record.lastError, !isUploading {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
         }
         .accessibilityElement(children: .combine)
     }
@@ -122,10 +157,27 @@ private struct CaptureRow: View {
     private var label: String {
         switch record.state {
         case .pending: return "Saved for identification"
-        case .matched: return "Identified · waiting for Spotify"
+        case .matched:
+            if connectionIssue != nil { return "Needs connection" }
+            if isUploading { return isOnline ? "Sending to Spotify…" : "Waiting for internet" }
+            return record.nextAttemptAt == nil ? "Queued for Spotify" : "Will retry automatically"
         case .delivered: return "Added to Spotify"
         case .unmatched: return "Not identified"
         }
+    }
+
+    private var color: Color {
+        if record.state == .delivered { return .green }
+        if record.state == .matched {
+            return connectionIssue == nil ? .blue : .orange
+        }
+        return .secondary
+    }
+
+    private var icon: String {
+        if record.state == .delivered { return "CircleCheck" }
+        if record.state == .unmatched || (record.state == .matched && connectionIssue != nil) { return "AlertCircle" }
+        return "Clock"
     }
 }
 
@@ -135,6 +187,7 @@ private struct SettingsView: View {
     @State private var endpoint = ""
     @State private var token = ""
     @State private var message: String?
+    @State private var savedConnection: DeliveryConfiguration?
 
     var body: some View {
         NavigationStack {
@@ -145,6 +198,13 @@ private struct SettingsView: View {
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                     SecureField("Access token", text: $token)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    HStack(spacing: 8) {
+                        Image(connectionIsSaved ? "CircleCheck" : "AlertCircle")
+                            .resizable().frame(width: 18, height: 18)
+                        Text(connectionIsSaved ? "Connection saved on this iPhone." : "Save the connection to enable Spotify delivery.")
+                            .font(.footnote)
+                    }
+                    .foregroundStyle(connectionIsSaved ? Color.green : Color.secondary)
                 } header: { Text("Music Sync") } footer: {
                     Text("Use the capture URL and device access token issued by Music Sync. Your connection is stored securely on this iPhone.")
                 }
@@ -153,6 +213,7 @@ private struct SettingsView: View {
                         do {
                             let configuration = try DeliveryConfiguration(endpoint: endpoint, token: token)
                             try Runtime.connection.save(configuration)
+                            savedConnection = configuration
                             message = "Connection saved."
                             Task {
                                 do { try await controller.delivery.connectionChanged(); await controller.resume() }
@@ -164,6 +225,7 @@ private struct SettingsView: View {
                 }
                 Section("Offline captures") {
                     Text("When online, Shazam listens and identifies the song as soon as it can. Offline captures are saved for your next online use. Once identified, delivery can continue in the background.")
+                    Text("Failed deliveries retry automatically while the app is running and on your next use. Added to Spotify appears only after Music Sync confirms delivery.")
                     Text("Shazam identifies the music. Music Sync adds it to Spotify.")
                 }
                 .font(.subheadline).foregroundStyle(.secondary)
@@ -173,11 +235,18 @@ private struct SettingsView: View {
             .onAppear {
                 do {
                     if let saved = try Runtime.connection.load() {
+                        savedConnection = saved
                         endpoint = saved.endpoint.absoluteString
                         token = saved.token
                     }
                 } catch { message = error.localizedDescription }
             }
         }
+    }
+
+    private var connectionIsSaved: Bool {
+        guard let savedConnection else { return false }
+        return endpoint.trimmingCharacters(in: .whitespacesAndNewlines) == savedConnection.endpoint.absoluteString
+            && token.trimmingCharacters(in: .whitespacesAndNewlines) == savedConnection.token
     }
 }
