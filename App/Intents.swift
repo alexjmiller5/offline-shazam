@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 struct CaptureSongIntent: AppIntent {
     static var title: LocalizedStringResource = "Capture song"
-    static var description = IntentDescription("Record 15 seconds of music and automatically process saved captures when online.")
+    static var description = IntentDescription("Identify music as you listen, or save an offline capture for automatic identification on your next online use.")
     static var openAppWhenRun = true
 
     @MainActor

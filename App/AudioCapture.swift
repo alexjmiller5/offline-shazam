@@ -56,11 +56,7 @@ final class ShazamMatcher: NSObject, SHSessionDelegate {
 
     nonisolated func session(_ session: SHSession, didFind match: SHMatch) {
         let item = match.mediaItems.first
-        let metadata = item.flatMap { item -> MatchMetadata? in
-            guard let title = item.title, let artist = item.artist else { return nil }
-            return MatchMetadata(title: title, artist: artist, appleMusicID: item.appleMusicID,
-                                 shazamURL: item.webURL?.absoluteString, appleMusicURL: item.appleMusicURL?.absoluteString, isrc: item.isrc)
-        }
+        let metadata = item.flatMap(MatchMetadata.init)
         Task { @MainActor in
             if let metadata { self.finish(.success(metadata)) }
             else { self.finish(.failure(CaptureError.missingMetadata)) }

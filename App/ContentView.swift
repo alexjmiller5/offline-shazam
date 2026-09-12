@@ -29,7 +29,9 @@ struct ContentView: View {
                             Image("Waveform").resizable().scaledToFit().frame(width: 76, height: 76)
                             Text(controller.isRecording ? "Listening…" : "Capture song")
                                 .font(.title3.weight(.semibold))
-                            Text(controller.isRecording ? "Recording a 15-second clip" : "Tap to listen for 15 seconds")
+                            Text(controller.isRecording
+                                 ? (controller.isOnline ? "Listening for a Shazam match" : "Saving an offline capture")
+                                 : "Tap to identify music")
                                 .font(.footnote)
                         }
                         .foregroundStyle(.white)
@@ -45,13 +47,13 @@ struct ContentView: View {
                         if let error {
                             Text(error).foregroundStyle(.red)
                         } else if controller.isRecording {
-                            Text("Listening to the music around you.")
+                            Text(controller.isOnline ? "Identifying the music around you." : "Saving the music for identification when online.")
                         } else if controller.isProcessing {
                             HStack(spacing: 8) { ProgressView(); Text("Identifying saved captures…") }
                         } else if let status = controller.status {
                             Text(status)
                         } else {
-                            Text("Saved songs are handled automatically the next time you use the app online.")
+                            Text("Identify music now. Offline captures are handled automatically on your next online use.")
                         }
                     }
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -161,7 +163,7 @@ private struct SettingsView: View {
                     if let message { Text(message).font(.footnote) }
                 }
                 Section("Offline captures") {
-                    Text("Capture anytime. Saved songs are identified when you next use the app online. Once identified, delivery can continue in the background.")
+                    Text("When online, Shazam listens and identifies the song as soon as it can. Offline captures are saved for your next online use. Once identified, delivery can continue in the background.")
                     Text("Shazam identifies the music. Music Sync adds it to Spotify.")
                 }
                 .font(.subheadline).foregroundStyle(.secondary)

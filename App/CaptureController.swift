@@ -6,7 +6,7 @@ import ShazamKit
 final class CaptureController {
     let store: CaptureStore
     let delivery: DeliveryService
-    let recordSignature: () async throws -> SHSignature
+    let recordAudio: () async throws -> CapturedAudio
     let processor: CaptureProcessor
     var isOnline = true
     var isRecording = false
@@ -17,11 +17,11 @@ final class CaptureController {
     @ObservationIgnored private var processingID: UUID?
 
     init(store: CaptureStore, delivery: DeliveryService,
-         recordSignature: @escaping () async throws -> SHSignature,
+         recordAudio: @escaping () async throws -> CapturedAudio,
          recognize: @escaping (Data) async throws -> MatchMetadata?) {
         self.store = store
         self.delivery = delivery
-        self.recordSignature = recordSignature
+        self.recordAudio = recordAudio
         processor = CaptureProcessor(store: store, recognize: recognize)
         refresh()
     }
@@ -40,8 +40,10 @@ final class CaptureController {
     private func recordAndSave() async throws -> CaptureRecord {
         isRecording = true
         defer { isRecording = false }
-        let signature = try await recordSignature()
-        return try store.capture(signature: signature)
+        let audio = try await recordAudio()
+        let record = try store.capture(signature: audio.signature)
+        if let metadata = audio.metadata { try store.matched(record, metadata: metadata) }
+        return record
     }
 
     func importAudio(_ url: URL) async throws -> CaptureRecord {
@@ -77,9 +79,11 @@ final class CaptureController {
         isProcessing = true
         let task = Task { @MainActor in
             do {
-                if isOnline { try await processor.process(preferred: preferred) }
                 try Task.checkCancellation()
-                try await delivery.enqueue()
+                await enqueueMatches()
+                if isOnline {
+                    try await processor.process(preferred: preferred) { await self.enqueueMatches() }
+                }
             } catch is CancellationError {
                 // Cancellation leaves durable work for the next invocation.
             } catch {
@@ -94,5 +98,11 @@ final class CaptureController {
             processingID = nil
             isProcessing = false
         }
+    }
+
+    private func enqueueMatches() async {
+        refresh()
+        do { try await delivery.enqueue() }
+        catch { status = "Saved captures will continue on your next use." }
     }
 }

@@ -1,104 +1,158 @@
 import AVFoundation
 import ShazamKit
 
+struct CapturedAudio {
+    let signature: SHSignature
+    var metadata: MatchMetadata? = nil
+}
+
+// The audio tap and Shazam callbacks run outside the main actor. The lock also
+// makes the saved signature a consistent snapshot when capture finishes.
+final class StreamingAudio: NSObject, SHSessionDelegate, @unchecked Sendable {
+    let session: SHSession
+    private let generator = SHSignatureGenerator()
+    private let lock = NSLock()
+    private var active = true
+    private var metadata: MatchMetadata?
+    private var onMatch: (() -> Void)?
+
+    init(session: SHSession = SHSession()) {
+        self.session = session
+        super.init()
+        session.delegate = self
+    }
+
+    func start(onMatch: @escaping () -> Void) {
+        lock.lock()
+        self.onMatch = onMatch
+        lock.unlock()
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime?) throws {
+        lock.lock()
+        guard active else { lock.unlock(); return }
+        do { try generator.append(buffer, at: time) }
+        catch { lock.unlock(); throw error }
+        lock.unlock()
+        session.matchStreamingBuffer(buffer, at: time)
+    }
+
+    func finish() -> CapturedAudio {
+        lock.lock()
+        active = false
+        onMatch = nil
+        let audio = CapturedAudio(signature: generator.signature(), metadata: metadata)
+        lock.unlock()
+        session.delegate = nil
+        return audio
+    }
+
+    func session(_ session: SHSession, didFind match: SHMatch) {
+        guard let metadata = match.mediaItems.first.flatMap(MatchMetadata.init) else { return }
+        lock.lock()
+        guard active else { lock.unlock(); return }
+        self.metadata = metadata
+        let callback = onMatch
+        lock.unlock()
+        callback?()
+    }
+
+    func session(_ session: SHSession, didNotFindMatchFor signature: SHSignature, error: Error?) {
+        if let error { RecognitionDiagnostics.log(error) }
+        // A missed window or temporary network failure must not discard audio.
+    }
+}
+
 @MainActor
-final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
-    private var recorder: AVAudioRecorder?
-    private var continuation: CheckedContinuation<Void, Error>?
+final class AudioRecorder {
+    private var continuation: CheckedContinuation<CapturedAudio, Error>?
     private var deadline: Task<Void, Never>?
     private var recordingID: UUID?
+    private var requestingCapture = false
 
-    func captureSignature() async throws -> SHSignature {
-        guard recorder == nil else { throw CaptureError.alreadyRecording }
+    func capture() async throws -> CapturedAudio {
+        guard !requestingCapture, recordingID == nil else { throw CaptureError.alreadyRecording }
+        requestingCapture = true
+        defer { requestingCapture = false }
         let allowed = await withCheckedContinuation { continuation in
             AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) }
         }
         guard allowed else { throw CaptureError.microphoneDenied }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
+        try Task.checkCancellation()
         let audioSession = AVAudioSession.sharedInstance()
-        defer {
-            try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
-            try? FileManager.default.removeItem(at: url)
-        }
+        defer { try? audioSession.setActive(false, options: .notifyOthersOnDeactivation) }
         try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker])
         try audioSession.setActive(true)
-        let recording = try AVAudioRecorder(url: url, settings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 44100,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
-        ])
-        try await recordUntilFinished(using: recording, start: { recording.record(forDuration: 15) })
-        return try await AudioCapture.signature(from: url)
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        guard format.channelCount > 0, [48000, 44100, 32000, 16000].contains(format.sampleRate) else {
+            throw CaptureError.invalidAudio
+        }
+        let stream = StreamingAudio()
+        var installedTap = false
+        return try await capture(using: stream, start: {
+            guard let id = self.recordingID else { throw CaptureError.recordingInterrupted }
+            input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, time in
+                do { try stream.append(buffer, at: time) }
+                catch {
+                    RecognitionDiagnostics.log(error)
+                    Task { @MainActor in self.finish(id: id, stream: stream, error: error) }
+                }
+            }
+            installedTap = true
+            engine.prepare()
+            try engine.start()
+        }, stop: {
+            engine.stop()
+            if installedTap { input.removeTap(onBus: 0) }
+        })
     }
 
-    func recordUntilFinished(using source: AVAudioRecorder? = nil, start: () -> Bool, timeout: Duration = .seconds(17)) async throws {
-        guard continuation == nil else { throw CaptureError.alreadyRecording }
+    func capture(using stream: StreamingAudio, start: () throws -> Void,
+                 stop: () -> Void, timeout: Duration = .seconds(15)) async throws -> CapturedAudio {
+        guard recordingID == nil else { throw CaptureError.alreadyRecording }
         let id = UUID()
         recordingID = id
-        recorder = source
-        source?.delegate = self
         let observer = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), queue: .main
         ) { [weak self] notification in
             guard let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                   type == AVAudioSession.InterruptionType.began.rawValue else { return }
-            MainActor.assumeIsolated {
-                guard self?.recordingID == id else { return }
-                self?.recorder?.stop()
-                self?.finish(.failure(CaptureError.recordingInterrupted))
-            }
+            MainActor.assumeIsolated { self?.finish(id: id, stream: stream, error: CaptureError.recordingInterrupted) }
         }
         defer {
             NotificationCenter.default.removeObserver(observer)
-            source?.delegate = nil
-            source?.stop()
-            if recordingID == id {
-                recorder = nil
-                recordingID = nil
-            }
+            stop()
+            if recordingID == id { recordingID = nil }
         }
-        try await withTaskCancellationHandler {
+        return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            return try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
+                stream.start { [weak self] in
+                    Task { @MainActor in self?.finish(id: id, stream: stream) }
+                }
                 deadline = Task { @MainActor [weak self] in
                     do { try await Task.sleep(for: timeout) }
                     catch { return }
-                    guard self?.recordingID == id else { return }
-                    self?.recorder?.stop()
-                    self?.finish(.failure(CaptureError.recordingInterrupted))
+                    self?.finish(id: id, stream: stream)
                 }
-                if !start() { finish(.failure(CaptureError.invalidAudio)) }
+                do { try start() }
+                catch { finish(id: id, stream: stream, error: error) }
             }
         } onCancel: {
-            Task { @MainActor in
-                guard self.recordingID == id else { return }
-                self.recorder?.stop()
-                self.finish(.failure(CancellationError()))
-            }
+            Task { @MainActor in self.finish(id: id, stream: stream, error: CancellationError()) }
         }
     }
 
-    private func finish(_ result: Result<Void, Error>) {
-        guard let continuation else { return }
+    private func finish(id: UUID, stream: StreamingAudio, error: Error? = nil) {
+        guard recordingID == id, let continuation else { return }
         self.continuation = nil
         deadline?.cancel()
         deadline = nil
-        continuation.resume(with: result)
-    }
-
-    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        Task { @MainActor in
-            guard self.recorder === recorder else { return }
-            finish(flag ? .success(()) : .failure(CaptureError.invalidAudio))
-        }
-    }
-
-    nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
-        Task { @MainActor in
-            guard self.recorder === recorder else { return }
-            finish(.failure(CaptureError.invalidAudio))
-        }
+        let audio = stream.finish()
+        if audio.signature.duration > 0 { continuation.resume(returning: audio) }
+        else { continuation.resume(throwing: error ?? CaptureError.invalidAudio) }
     }
 }

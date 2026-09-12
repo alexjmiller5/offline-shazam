@@ -5,6 +5,99 @@ import XCTest
 
 @MainActor
 final class ControllerTests: XCTestCase {
+    func testCanceledCaptureKeepsItsAudioAndRetriesAutomaticallyOnNextUse() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CaptureStore(directory: directory)
+        let service = DeliveryService(store: store, uploadDirectory: directory.appendingPathComponent("uploads"),
+            connection: { nil }, sessionConfiguration: .ephemeral)
+        let recorder = AudioRecorder()
+        let started = expectation(description: "audio captured before cancellation")
+        let controller = CaptureController(store: store, delivery: service, recordAudio: {
+            let stream = StreamingAudio(session: try unrelatedStreamingSession())
+            return try await recorder.capture(using: stream, start: {
+                try stream.append(streamingFixture(seconds: 2), at: nil)
+                started.fulfill()
+            }, stop: {})
+        }, recognize: { _ in MatchMetadata(title: "Example Song", artist: "Example Artist") })
+        let capture = Task { _ = try await controller.capture() }
+        await fulfillment(of: [started], timeout: 1)
+        capture.cancel()
+        try await capture.value
+        let record = try XCTUnwrap(store.records().first)
+        XCTAssertEqual(record.state, .pending)
+        XCTAssertEqual(try SHSignature(dataRepresentation: store.signature(for: record)).duration, 2, accuracy: 0.1)
+        XCTAssertEqual(try CaptureStore(directory: directory).records().count, 1)
+        await controller.resume()
+        XCTAssertEqual(record.state, .matched)
+        service.session.finishTasksAndInvalidate()
+    }
+
+    func testLiveMatchIsPersistedAndUploadedBeforeRetryingOlderCaptures() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CaptureStore(directory: directory)
+        let older = try store.capture(signature: SHSignatureGenerator().signature())
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CaptureHTTPStub.self]
+        let uploaded = expectation(description: "live match uploads during older recognition")
+        CaptureHTTPStub.reply = { _ in uploaded.fulfill(); return Data("{}".utf8) }
+        let service = DeliveryService(store: store, uploadDirectory: directory.appendingPathComponent("uploads"),
+            connection: { try DeliveryConfiguration(endpoint: "https://example.com/capture", token: "test-token") },
+            sessionConfiguration: configuration)
+        let backlogStarted = expectation(description: "older recognition starts")
+        let metadata = MatchMetadata(title: "Example Song", artist: "Example Artist", isrc: "XX0000000001")
+        let controller = CaptureController(store: store, delivery: service, recordAudio: {
+            CapturedAudio(signature: SHSignatureGenerator().signature(), metadata: metadata)
+        }, recognize: { data in
+            XCTAssertEqual(data, try store.signature(for: older), "A live match must reuse its captured metadata")
+            backlogStarted.fulfill()
+            try await Task.sleep(for: .seconds(60))
+            return nil
+        })
+        let capture = Task { _ = try await controller.capture() }
+        await fulfillment(of: [backlogStarted, uploaded], timeout: 2)
+        let persisted = try CaptureStore(directory: directory).records().first { $0.id != older.id }
+        XCTAssertEqual(persisted?.metadata, metadata)
+        XCTAssertEqual(controller.records.first(where: { $0.id != older.id })?.metadata, metadata)
+        capture.cancel()
+        try await capture.value
+        service.session.finishTasksAndInvalidate()
+    }
+
+    func testCurrentCaptureUploadsAndAppearsBeforeOlderRecognitionFinishes() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CaptureStore(directory: directory)
+        let older = try store.capture(signature: SHSignatureGenerator().signature())
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CaptureHTTPStub.self]
+        let uploaded = expectation(description: "current match uploads while backlog waits")
+        CaptureHTTPStub.reply = { _ in uploaded.fulfill(); return Data("{}".utf8) }
+        let service = DeliveryService(store: store, uploadDirectory: directory.appendingPathComponent("uploads"),
+            connection: { try DeliveryConfiguration(endpoint: "https://example.com/capture", token: "test-token") },
+            sessionConfiguration: configuration)
+        let backlogStarted = expectation(description: "older recognition is waiting")
+        var calls = 0
+        let controller = CaptureController(store: store, delivery: service, recordAudio: {
+            CapturedAudio(signature: SHSignatureGenerator().signature())
+        }, recognize: { _ in
+            calls += 1
+            if calls == 2 {
+                backlogStarted.fulfill()
+                try await Task.sleep(for: .seconds(60))
+            }
+            return MatchMetadata(title: "Example Song", artist: "Example Artist")
+        })
+        let capture = Task { _ = try await controller.capture() }
+        await fulfillment(of: [backlogStarted], timeout: 2)
+        XCTAssertEqual(controller.records.first(where: { $0.id != older.id })?.metadata?.title, "Example Song")
+        await fulfillment(of: [uploaded], timeout: 1)
+        capture.cancel()
+        _ = try await capture.value
+        service.session.finishTasksAndInvalidate()
+    }
+
     func testImportedAudioIsAttemptedBeforeReturningEvenWhenAnotherPassIsRunning() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -13,9 +106,9 @@ final class ControllerTests: XCTestCase {
         let service = DeliveryService(store: store, uploadDirectory: directory.appendingPathComponent("uploads"), connection: { nil }, sessionConfiguration: .ephemeral)
         let started = expectation(description: "older recognition started")
         var matches = 0
-        let controller = CaptureController(store: store, delivery: service, recordSignature: {
+        let controller = CaptureController(store: store, delivery: service, recordAudio: {
             XCTFail("Import must not start another microphone recording")
-            return SHSignatureGenerator().signature()
+            return CapturedAudio(signature: SHSignatureGenerator().signature())
         }, recognize: { _ in
             matches += 1
             if matches == 1 { started.fulfill(); try await Task.sleep(for: .seconds(60)) }
@@ -47,7 +140,7 @@ final class ControllerTests: XCTestCase {
         var recordings = 0
         var matches = 0
         var finishRecording: CheckedContinuation<Void, Never>?
-        let controller = CaptureController(store: store, delivery: service, recordSignature: {
+        let controller = CaptureController(store: store, delivery: service, recordAudio: {
             recordings += 1
             if recordings == 2 {
                 await withCheckedContinuation { continuation in
@@ -55,7 +148,7 @@ final class ControllerTests: XCTestCase {
                     secondRecording.fulfill()
                 }
             }
-            return SHSignatureGenerator().signature()
+            return CapturedAudio(signature: SHSignatureGenerator().signature())
         }, recognize: { _ in
             matches += 1
             if matches == 1 {
@@ -83,9 +176,9 @@ final class ControllerTests: XCTestCase {
         let store = try CaptureStore(directory: directory)
         let service = DeliveryService(store: store, uploadDirectory: directory.appendingPathComponent("uploads"), connection: { nil }, sessionConfiguration: .ephemeral)
         var events: [String] = []
-        let controller = CaptureController(store: store, delivery: service, recordSignature: {
+        let controller = CaptureController(store: store, delivery: service, recordAudio: {
             events.append("record")
-            return SHSignatureGenerator().signature()
+            return CapturedAudio(signature: SHSignatureGenerator().signature())
         }, recognize: { _ in
             events.append("recognize")
             return MatchMetadata(title: "Example Song", artist: "Example Artist")
@@ -107,7 +200,7 @@ final class ControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try CaptureStore(directory: directory)
         let service = DeliveryService(store: store, uploadDirectory: directory.appendingPathComponent("uploads"), connection: { nil }, sessionConfiguration: .ephemeral)
-        let controller = CaptureController(store: store, delivery: service, recordSignature: {
+        let controller = CaptureController(store: store, delivery: service, recordAudio: {
             throw CaptureError.microphoneDenied
         }, recognize: { _ in
             XCTFail("Do not process a backlog ahead of the requested capture")

@@ -1,16 +1,16 @@
 # Offline Shazam
 
-Capture music on an iPhone, including offline. The next time you use the app online, saved captures are identified with Apple's ShazamKit and delivered to Music Sync for Spotify.
+Identify music on an iPhone as you listen with Apple's ShazamKit. Offline captures are saved automatically and identified on your next online use. Music Sync delivers recognized songs to Spotify.
 
 ## Use
 
 1. Open Settings and enter the Music Sync capture URL and a capture-only access token. The connection is stored in the iOS Keychain.
-2. Tap **Capture song**, or use the **Capture song** App Shortcut. The app records a 15-second clip, saves its Shazam signature, and processes saved captures when online.
+2. Tap **Capture song**, or use the **Capture song** App Shortcut. Shazam listens and stops recording as soon as it identifies the song. If there is no early match, the app saves up to 15 seconds as a Shazam signature for identification.
 3. Check recent captures for their status: saved, identified, added to Spotify, or not identified. There is no manual sync step.
 
 The capture Shortcut opens the app to use the microphone. For an existing audio-recording Shortcut, add the **Save audio capture** action after **Record Audio**, passing its audio output. Clips must be at most 30 seconds and 16 MiB. This action waits for signature persistence and a bounded recognition pass before returning; it does not launch detached recognition work.
 
-Captures are stored before reporting success. Recognition processes at most three captures per invocation, with the new capture first. A larger backlog continues on subsequent use. Delivery uses file-backed background URLSession uploads, following the same native iOS mechanism used by Receptor. iOS may continue an enrolled upload while the app is suspended. Recognition of an offline signature needs the app to run again; reconnecting while it stays closed does not guarantee immediate recognition. Force-quitting the app can also cancel background transfers until you open it again.
+Live recognition receives the same microphone audio used to generate the offline signature. Captures and recognized metadata are stored before reporting success. A new match is displayed and queued for Spotify delivery before older recognition work. Saved-signature recognition processes at most three captures per invocation, with the new capture first, and queues each match for delivery as it is found. A larger backlog continues on subsequent use. Delivery uses file-backed background URLSession uploads, following the same native iOS mechanism used by Receptor. iOS may continue an enrolled upload while the app is suspended. Recognition of an offline signature needs the app to run again; reconnecting while it stays closed does not guarantee immediate recognition. Force-quitting the app can also cancel background transfers until you open it again.
 
 Shazam provides recognition. No Mac or replacement recognition provider is required. When Shazam supplies an ISRC, Music Sync requires that exact recording on Spotify. Otherwise, it uses conservative title and artist matching. A missing Spotify match remains pending rather than adding a different recording.
 
@@ -38,6 +38,6 @@ Music Sync owns the capture API, Spotify account connection, revocable client to
 
 A request contains `capture_id` (stable UUID), `title`, `artist`, `apple_music_id`, and `shazam_url`, with optional `isrc`. Success requires a 2xx response with `ok: true`, the same capture UUID, and a nonempty recording ISRC. If Shazam supplied an ISRC, the receipt must agree. Other responses retain the matched metadata for retry; numeric or HTTP-date `Retry-After` is respected. Request redirects are rejected. The server durably pins the selected recording before Spotify side effects and deduplicates repeat requests.
 
-Signatures and queue metadata stay in the app's Application Support directory. Raw recording files are temporary and deleted after signature generation. Successful delivery removes the signature while retaining recent song history. Unidentified recordings remain visible and retained. There is no analytics SDK.
+Signatures and queue metadata stay in the app's Application Support directory. Live microphone audio is processed in memory; temporary import files are removed after processing. Successful delivery removes the signature while retaining recent song history. Unidentified recordings remain visible and retained. There is no analytics SDK.
 
 The waveform icon is [Tabler wave-sine](https://icon-sets.iconify.design/tabler/wave-sine/), used under the MIT license.

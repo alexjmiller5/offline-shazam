@@ -1,6 +1,6 @@
 # Offline Shazam
 
-Native SwiftUI app for iOS 17+. Uses Apple ShazamKit to persist offline music signatures and recognize unfinished captures during subsequent use. No third-party recognition service or Mac runtime dependency.
+Native SwiftUI app for iOS 17+. Uses Apple ShazamKit to identify music while listening and persist offline signatures for automatic recognition on subsequent use. No third-party recognition service or Mac runtime dependency.
 
 ## Source and checks
 
@@ -13,10 +13,12 @@ Device signing and installation use caller-supplied `IOS_TEAM_ID`, `IOS_PROFILE`
 ## Queue invariants
 
 - Start a new capture promptly; backlog work must not delay recording.
+- Feed microphone audio to native ShazamKit streaming recognition while generating the offline signature from the same audio. Stop early on a match; retain useful audio if recognition fails or connectivity drops.
 - Persist the signature file and SwiftData record before saying saved.
 - Await recognition within the app or App Intent lifetime. Never start detached recognition and return from an intent.
 - Bound a recognition pass to three captures and a six-second timeout each. Prioritize the current capture, then previously unattempted work.
 - Persist a match before enqueueing a file-backed background URLSession upload. Reuse matched metadata on delivery retries.
+- Display and enqueue each match before slower backlog recognition. Current online identification and upload must not wait for a future invocation.
 - Mark delivered only after a valid response confirms the same capture UUID and recording. Retain all unfinished work through network, auth, and malformed-response failures.
 - Reattach the background URLSession on OS relaunch and finish the OS callback after persistence.
 

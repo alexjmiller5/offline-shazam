@@ -21,7 +21,7 @@ enum Runtime {
                                        connection: { try connection.load() }, sessionConfiguration: configuration)
         let recorder = AudioRecorder()
         let controller = CaptureController(store: store, delivery: delivery,
-                                           recordSignature: { try await recorder.captureSignature() },
+                                           recordAudio: { try await recorder.capture() },
                                            recognize: { try await ShazamMatcher().match($0) })
         delivery.onChange = { [weak controller] in controller?.refresh() }
         return controller

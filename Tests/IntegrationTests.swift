@@ -5,6 +5,41 @@ import XCTest
 
 @MainActor
 final class IntegrationTests: XCTestCase {
+    func testLiveAudioMatchesBeforeDeadlineAndItsSavedSignatureMatchesTheSameRecording() async throws {
+        let buffer = try streamingFixture()
+        let generator = SHSignatureGenerator()
+        try generator.append(buffer, at: nil)
+        let catalog = SHCustomCatalog()
+        try catalog.addReferenceSignature(generator.signature(), representing: [
+            SHMediaItem(properties: [.title: "Example Song", .artist: "Example Artist", .ISRC: "XX0000000001"])
+        ])
+        let recorder = AudioRecorder()
+        let stream = StreamingAudio(session: SHSession(catalog: catalog))
+        let finished = expectation(description: "native streaming match finishes before the 15 second deadline")
+        var captured: CapturedAudio?
+        var captureError: Error?
+        var stopped = false
+        let task = Task { @MainActor in
+            do {
+                captured = try await recorder.capture(using: stream, start: {
+                    try stream.append(buffer, at: nil)
+                }, stop: { stopped = true })
+            } catch { captureError = error }
+            finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 4)
+        task.cancel()
+        await task.value
+        XCTAssertNil(captureError)
+        XCTAssertTrue(stopped, "An early match must release the audio source")
+        let audio = try XCTUnwrap(captured)
+        XCTAssertEqual(audio.metadata?.isrc, "XX0000000001")
+        XCTAssertEqual(audio.signature.duration, 10, accuracy: 0.1)
+        let restored = try SHSignature(dataRepresentation: audio.signature.dataRepresentation)
+        let match = try await ShazamMatcher(session: SHSession(catalog: catalog)).match(restored.dataRepresentation)
+        XCTAssertEqual(match, audio.metadata, "The durable fallback must represent the same audio that matched live")
+    }
+
     func testConfigurationRejectsCredentialsInURLAndInsecureEndpoints() throws {
         for value in ["http://example.com/capture", "https://user:secret@example.com/capture", "https://example.com/capture?token=secret", "https://example.com/capture#token", "not a url"] {
             XCTAssertThrowsError(try DeliveryConfiguration(endpoint: value, token: "token"))

@@ -1,4 +1,6 @@
 import Foundation
+import OSLog
+import ShazamKit
 
 struct MatchMetadata: Equatable, Sendable {
     let title: String
@@ -7,6 +9,26 @@ struct MatchMetadata: Equatable, Sendable {
     var shazamURL: String? = nil
     var appleMusicURL: String? = nil
     var isrc: String? = nil
+}
+
+extension MatchMetadata {
+    init?(_ item: SHMediaItem) {
+        guard let title = item.title, let artist = item.artist else { return nil }
+        self.init(title: title, artist: artist, appleMusicID: item.appleMusicID,
+                  shazamURL: item.webURL?.absoluteString, appleMusicURL: item.appleMusicURL?.absoluteString, isrc: item.isrc)
+    }
+}
+
+enum RecognitionDiagnostics {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "offline-shazam", category: "recognition")
+
+    static func log(_ error: Error) {
+        let error = error as NSError
+        logger.error("Recognition failed: \(error.domain, privacy: .public) code \(error.code)")
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            logger.error("Underlying failure: \(underlying.domain, privacy: .public) code \(underlying.code)")
+        }
+    }
 }
 
 @MainActor
@@ -20,7 +42,7 @@ final class CaptureProcessor {
         self.recognize = recognize
     }
 
-    func process(preferred: UUID? = nil, limit: Int = 3) async throws {
+    func process(preferred: UUID? = nil, limit: Int = 3, didProcess: () async -> Void = {}) async throws {
         guard !processing, limit > 0 else { return }
         processing = true
         defer { processing = false }
@@ -43,11 +65,13 @@ final class CaptureProcessor {
                     record.lastError = "Shazam could not identify this recording."
                 }
             } catch {
+                if !(error is CancellationError) { RecognitionDiagnostics.log(error) }
                 record.lastError = "Recognition interrupted. Saved for next use."
                 try store.save()
                 if error is CancellationError { throw error }
             }
             try store.save()
+            await didProcess()
         }
     }
 }

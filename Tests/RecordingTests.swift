@@ -1,73 +1,89 @@
 import AVFoundation
+import ShazamKit
 import XCTest
 @testable import OfflineShazam
 
 @MainActor
 final class RecordingTests: XCTestCase {
-    func testDelayedCallbacksFromInterruptedRecorderCannotFinishTheNextRecording() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let settings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44100, AVNumberOfChannelsKey: 1]
-        let old = try AVAudioRecorder(url: directory.appendingPathComponent("old.m4a"), settings: settings)
-        let current = try AVAudioRecorder(url: directory.appendingPathComponent("current.m4a"), settings: settings)
+    func testOfflineDeadlinePreservesAudioForRecognitionOnNextUse() async throws {
         let recorder = AudioRecorder()
-        let oldStarted = expectation(description: "first recording starts")
-        let first = Task { @MainActor in
-            try? await recorder.recordUntilFinished(using: old, start: { oldStarted.fulfill(); return true })
-        }
-        await fulfillment(of: [oldStarted], timeout: 1)
-        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(),
-                                        userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
-        await first.value
-        let currentStarted = expectation(description: "second recording starts")
-        var finished = false
-        let second = Task { @MainActor in
-            try? await recorder.recordUntilFinished(using: current, start: { currentStarted.fulfill(); return true })
-            finished = true
-        }
-        await fulfillment(of: [currentStarted], timeout: 1)
-        recorder.audioRecorderDidFinishRecording(old, successfully: true)
-        recorder.audioRecorderEncodeErrorDidOccur(old, error: CaptureError.invalidAudio)
-        try await Task.sleep(for: .milliseconds(50))
-        XCTAssertFalse(finished, "A delayed callback from the old recorder must not finish the new capture")
-        recorder.audioRecorderDidFinishRecording(current, successfully: true)
-        await second.value
-        XCTAssertTrue(finished)
+        let stream = StreamingAudio(session: try unrelatedStreamingSession())
+        let audio = try await recorder.capture(using: stream, start: {
+            try stream.append(streamingFixture(seconds: 2), at: nil)
+            stream.session(stream.session, didNotFindMatchFor: SHSignatureGenerator().signature(), error: URLError(.notConnectedToInternet))
+        }, stop: {}, timeout: .milliseconds(30))
+        XCTAssertNil(audio.metadata)
+        XCTAssertEqual(audio.signature.duration, 2, accuracy: 0.1)
     }
 
-    func testAudioInterruptionEndsThePendingRecording() async {
+    func testInterruptionPreservesUsefulAudioAndAnOldCaptureCannotFinishTheNextOne() async throws {
         let recorder = AudioRecorder()
-        let started = expectation(description: "recording started")
-        let finished = expectation(description: "interruption finishes recording")
-        var failure: Error?
-        let task = Task { @MainActor in
-            do { try await recorder.recordUntilFinished(start: { started.fulfill(); return true }) }
-            catch { failure = error }
-            finished.fulfill()
+        let old = StreamingAudio(session: try unrelatedStreamingSession())
+        let started = expectation(description: "first recording starts")
+        let first = Task { @MainActor in
+            try await recorder.capture(using: old, start: {
+                try old.append(streamingFixture(), at: nil)
+                started.fulfill()
+            }, stop: {})
         }
         await fulfillment(of: [started], timeout: 1)
-        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
-                                        object: AVAudioSession.sharedInstance(),
-                                        userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
-        await fulfillment(of: [finished], timeout: 1)
-        XCTAssertEqual(failure?.localizedDescription, CaptureError.recordingInterrupted.localizedDescription)
-        task.cancel()
-        await task.value
+        interrupt()
+        let saved = try await first.value
+        XCTAssertEqual(saved.signature.duration, 10, accuracy: 0.1)
+        let catalog = SHCustomCatalog()
+        try catalog.addReferenceSignature(saved.signature, representing: [SHMediaItem(properties: [.title: "Example Song", .artist: "Example Artist"])])
+        let nativeResult = await SHSession(catalog: catalog).result(from: saved.signature)
+        guard case .match(let staleMatch) = nativeResult else { return XCTFail("The saved fixture should match natively") }
+        let current = StreamingAudio(session: try unrelatedStreamingSession())
+        let nextStarted = expectation(description: "next recording starts")
+        var finished = false
+        let second = Task { @MainActor in
+            let result = try await recorder.capture(using: current, start: { nextStarted.fulfill() }, stop: {})
+            finished = true
+            return result
+        }
+        await fulfillment(of: [nextStarted], timeout: 1)
+        try old.append(streamingFixture(seconds: 2), at: nil)
+        old.session(old.session, didFind: staleMatch)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(finished)
+        second.cancel()
+        do { _ = try await second.value; XCTFail("No audio should remain a cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
     }
 
-    func testRecordingHasADeadlineWhenTheSystemNeverSendsCompletion() async {
+    func testCancellationPreservesAudioAndStopsTheSource() async throws {
         let recorder = AudioRecorder()
-        let finished = expectation(description: "deadline finishes recording")
-        var failure: Error?
+        let stream = StreamingAudio(session: try unrelatedStreamingSession())
+        let started = expectation(description: "recording starts")
+        var stopped = false
         let task = Task { @MainActor in
-            do { try await recorder.recordUntilFinished(start: { true }, timeout: .milliseconds(10)) }
-            catch { failure = error }
-            finished.fulfill()
+            try await recorder.capture(using: stream, start: {
+                try stream.append(streamingFixture(seconds: 2), at: nil)
+                started.fulfill()
+            }, stop: { stopped = true })
         }
-        await fulfillment(of: [finished], timeout: 1)
-        XCTAssertEqual(failure?.localizedDescription, CaptureError.recordingInterrupted.localizedDescription)
+        await fulfillment(of: [started], timeout: 1)
         task.cancel()
-        await task.value
+        let audio = try await task.value
+        XCTAssertEqual(audio.signature.duration, 2, accuracy: 0.1)
+        XCTAssertTrue(stopped)
+    }
+
+    func testInterruptionWithoutAudioRemainsAnError() async {
+        let recorder = AudioRecorder()
+        let started = expectation(description: "recording started")
+        let task = Task { @MainActor in
+            try await recorder.capture(using: StreamingAudio(), start: { started.fulfill() }, stop: {})
+        }
+        await fulfillment(of: [started], timeout: 1)
+        interrupt()
+        do { _ = try await task.value; XCTFail("An empty recording cannot be saved") }
+        catch { XCTAssertEqual(error.localizedDescription, CaptureError.recordingInterrupted.localizedDescription) }
+    }
+
+    private func interrupt() {
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(),
+            userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
     }
 }
