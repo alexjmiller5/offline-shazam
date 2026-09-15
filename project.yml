@@ -51,6 +51,43 @@ targets:
         CFBundleDisplayName: Song Capture
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+  OfflineShazamMac:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources: [App, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER)
+        PRODUCT_NAME: OfflineShazam
+        DEVELOPMENT_TEAM: 467A4PRB8F
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: 1
+    info:
+      path: Mac/Info.plist
+      properties:
+        CFBundleDisplayName: Offline Shazam
+        NSMicrophoneUsageDescription: Record a short clip to identify music, including when offline.
+        LSApplicationCategoryType: public.app-category.music
+    entitlements:
+      path: Mac/OfflineShazam.entitlements
+      properties:
+        com.apple.security.device.audio-input: true
+  OfflineShazamMacTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources: [Tests]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER).mactests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/OfflineShazam.app/Contents/MacOS/OfflineShazam
+        BUNDLE_LOADER: $(TEST_HOST)
+    dependencies:
+      - target: OfflineShazamMac
   OfflineShazamTests:
     type: bundle.unit-test
     platform: iOS
@@ -72,6 +109,13 @@ targets:
     dependencies:
       - target: OfflineShazam
 schemes:
+  OfflineShazamMac:
+    build:
+      targets:
+        OfflineShazamMac: all
+        OfflineShazamMacTests: [test]
+    test:
+      targets: [OfflineShazamMacTests]
   OfflineShazam:
     build:
       targets:

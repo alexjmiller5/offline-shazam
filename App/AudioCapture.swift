@@ -78,7 +78,7 @@ enum CaptureError: LocalizedError {
         case .invalidAudio: return "Use a readable audio clip up to 30 seconds long."
         case .missingMetadata: return "Shazam returned incomplete song details. The capture is saved for another attempt."
         case .alreadyRecording: return "A capture is already in progress."
-        case .microphoneDenied: return "Allow microphone access in iPhone Settings to capture music."
+        case .microphoneDenied: return "Allow microphone access in \(Runtime.deviceName == "Mac" ? "System Settings" : "iPhone Settings") to capture music."
         case .recordingInterrupted: return "The recording was interrupted before it was saved. Please try again."
         }
     }

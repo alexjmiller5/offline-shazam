@@ -77,10 +77,10 @@ struct ConnectionStore {
     }
 
     func save(_ configuration: DeliveryConfiguration) throws {
-        let values: [String: Any] = [
-            kSecValueData as String: try JSONEncoder().encode(configuration),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
+        var values: [String: Any] = [kSecValueData as String: try JSONEncoder().encode(configuration)]
+        #if os(iOS)
+        values[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        #endif
         var status = SecItemUpdate(query as CFDictionary, values as CFDictionary)
         if status == errSecItemNotFound {
             status = SecItemAdd(query.merging(values) { _, new in new } as CFDictionary, nil)

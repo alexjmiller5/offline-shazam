@@ -100,11 +100,11 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 24).padding(.bottom, 32)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Platform.groupedBackground)
             .navigationTitle("Offline Shazam")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineTitle()
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: Platform.trailing) {
                     Button("Settings") { showingSettings = true }
                 }
             }
@@ -205,19 +205,18 @@ private struct SettingsView: View {
             Form {
                 Section {
                     TextField("Capture URL", text: $endpoint)
-                        .keyboardType(.URL).textContentType(.URL)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .urlEntry()
                     SecureField("Access token", text: $token)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .plainEntry()
                     HStack(spacing: 8) {
                         Image(connectionIsSaved ? "CircleCheck" : "AlertCircle")
                             .resizable().frame(width: 18, height: 18)
-                        Text(connectionIsSaved ? "Connection saved on this iPhone." : "Save the connection to enable Spotify delivery.")
+                        Text(connectionIsSaved ? "Connection saved on this \(Runtime.deviceName)." : "Save the connection to enable Spotify delivery.")
                             .font(.footnote)
                     }
                     .foregroundStyle(connectionIsSaved ? Color.green : Color.secondary)
                 } header: { Text("Music Sync") } footer: {
-                    Text("Use the capture URL and device access token issued by Music Sync. Your connection is stored securely on this iPhone.")
+                    Text("Use the capture URL and device access token issued by Music Sync. Your connection is stored securely on this \(Runtime.deviceName).")
                 }
                 Section {
                     Button("Save connection") {
@@ -249,8 +248,9 @@ private struct SettingsView: View {
                 }
                 .font(.subheadline).foregroundStyle(.secondary)
             }
-            .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .formStyle(.grouped)
+            .navigationTitle("Settings").inlineTitle()
+            .toolbar { ToolbarItem(placement: Platform.trailing) { Button("Done") { dismiss() } } }
             .onAppear {
                 do {
                     if let saved = try Runtime.connection.load() {
@@ -261,6 +261,7 @@ private struct SettingsView: View {
                 } catch { message = error.localizedDescription }
             }
         }
+        .sheetChrome { dismiss() }
     }
 
     private var connectionIsSaved: Bool {
@@ -269,3 +270,76 @@ private struct SettingsView: View {
             && token.trimmingCharacters(in: .whitespacesAndNewlines) == savedConnection.token
     }
 }
+
+enum Platform {
+    #if os(iOS)
+    static let groupedBackground = Color(uiColor: .systemGroupedBackground)
+    static let trailing: ToolbarItemPlacement = .topBarTrailing
+    #else
+    static let groupedBackground = Color(nsColor: .windowBackgroundColor)
+    static let trailing: ToolbarItemPlacement = .primaryAction
+    #endif
+}
+
+private extension View {
+    // macOS sheets take no toolbar and size to content; give Settings a fixed frame and a Done bar.
+    @ViewBuilder func sheetChrome(done: @escaping () -> Void) -> some View {
+        #if os(macOS)
+        frame(width: 460, height: 640)
+            .safeAreaInset(edge: .bottom) {
+                HStack { Spacer(); Button("Done", action: done).keyboardShortcut(.defaultAction) }
+                    .padding(12).background(.bar)
+            }
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder func inlineTitle() -> some View {
+        #if os(iOS)
+        navigationBarTitleDisplayMode(.inline)
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder func plainEntry() -> some View {
+        #if os(iOS)
+        textInputAutocapitalization(.never).autocorrectionDisabled()
+        #else
+        autocorrectionDisabled()
+        #endif
+    }
+
+    @ViewBuilder func urlEntry() -> some View {
+        #if os(iOS)
+        keyboardType(.URL).textContentType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+        #else
+        autocorrectionDisabled()
+        #endif
+    }
+}
+
+#if os(macOS)
+struct MenuBarView: View {
+    @Bindable var controller: CaptureController
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button(controller.isRecording ? "Cancel capture" : "Capture song") {
+            if controller.isRecording { controller.cancelCapture() }
+            else { Task { _ = try? await controller.capture() } }
+        }
+        .keyboardShortcut("s")
+        if let status = controller.status { Text(status) }
+        let pending = controller.records.filter { $0.state == .pending || $0.state == .matched }.count
+        if pending > 0 { Text("\(pending) pending") }
+        Divider()
+        Button("Open Offline Shazam") {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "main")
+        }
+        Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
+    }
+}
+#endif

@@ -1,6 +1,6 @@
 # Offline Shazam
 
-Identify music on an iPhone as you listen with Apple's ShazamKit. Offline captures are saved automatically and identified on your next online use. Music Sync delivers recognized songs to Spotify.
+Identify music on an iPhone or Mac as you listen with Apple's ShazamKit. Offline captures are saved automatically and identified on your next online use. Music Sync delivers recognized songs to Spotify.
 
 ## Use
 
@@ -49,3 +49,9 @@ Tap the capture button again to cancel an accidental recording. Explicit Cancel 
 On iOS 18+, the Capture song Shortcut uses the native audio-recording intent and runs without opening the app, including when the app was previously swiped away. Enable Live Activities in the app's system settings. iOS 17 asks to continue in the foreground. Microphone access, native notification authorization and Live Activities are user settings; a replacement phone must be enrolled again with its own Music Sync token.
 
 Recognition waits up to 10 seconds for Spotify delivery before notifying. A confirmed delivery during that window produces one combined notification. Later delivery replaces that notification with an Added to Spotify alert, so each song shows one card. Only a valid Music Sync receipt permits the Spotify confirmation. Denying notifications does not prevent capture or delivery; notification permissions can be changed in iOS Settings.
+
+## Mac app
+
+The same capture, queue and delivery code ships as a native macOS app (macOS 14+) with a Capture window and a menu-bar item (Capture song, pending count, Open, Quit). Enter the Mac's own Music Sync capture token in Settings; each device gets its own token. There is no Live Activity or Shortcut on the Mac; the app must be running to capture. Allow microphone access and notifications when prompted.
+
+Releasing the Mac app = pushing a tag `vX.Y.Z`: `.github/workflows/release.yml` builds an unsigned Release with `just build-mac`, Developer ID-signs and notarizes it, publishes a GitHub release and bumps the `offline-shazam` cask in the Homebrew tap. Install it declaratively from the tap. `just check-mac` / `just test-mac` are the Mac CI gates; `just run-mac` makes a development-signed local build for a microphone smoke test.

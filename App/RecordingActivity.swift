@@ -1,4 +1,6 @@
+#if os(iOS)
 import ActivityKit
+#endif
 import Foundation
 
 enum RecordingActivityError: LocalizedError {
@@ -35,6 +37,9 @@ final class RecordingActivity {
 
     private static func requestActivity(attributes: RecordingAttributes,
                                         state: RecordingAttributes.ContentState) async throws -> End {
+        #if !os(iOS)
+        throw RecordingActivityError.unavailable
+        #else
         // A force quit can leave an indicator behind. A fresh user invocation
         // starts a new capture and retires indicators from the previous process.
         for activity in Activity<RecordingAttributes>.activities {
@@ -49,5 +54,6 @@ final class RecordingActivity {
             throw RecordingActivityError.unavailable
         }
         return { await activity.end(nil, dismissalPolicy: .immediate) }
+        #endif
     }
 }

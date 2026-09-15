@@ -83,7 +83,11 @@ final class RecordingTests: XCTestCase {
     }
 
     private func interrupt() {
+        #if os(iOS)
         NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(),
             userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
+        #else
+        NotificationCenter.default.post(name: AudioRecorder.interruptionNotification, object: nil)
+        #endif
     }
 }

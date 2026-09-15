@@ -1,0 +1,129 @@
+name: release
+
+# Releasing = pushing a tag vX.Y.Z. This workflow builds, Developer-ID-signs,
+# notarizes, staples, publishes a GH release, and bumps the Homebrew cask.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  APP: OfflineShazam
+  KEYCHAIN: release.keychain-db
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install build tools
+        run: brew install just xcodegen
+
+      - uses: 1Password/install-cli-action@v4
+
+      # The one GH secret: this project's 1Password service-account token,
+      # scoped read-only to the project vault + the shared Apple Signing vault.
+      # op:// refs below are BY NAME on purpose: op-project-bootstrap parses this file
+      # to provision/verify the vault + items, and names are its input (an ID can't name
+      # a vault that doesn't exist yet). The ONE exception to the IDs-over-names rule -
+      # do NOT convert these to IDs. See global AGENTS.md. Renamed an item? Update here.
+      - uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          DEVELOPER_ID_P12_BASE64: op://Apple Signing/Developer ID Application Cert/p12_base64
+          DEVELOPER_ID_P12_PASSWORD: op://Apple Signing/Developer ID Application Cert/password
+          ASC_KEY_P8_BASE64: op://Apple Signing/App Store Connect API Key/p8_base64
+          ASC_KEY_ID: op://Apple Signing/App Store Connect API Key/key_id
+          ASC_ISSUER_ID: op://Apple Signing/App Store Connect API Key/issuer_id
+          TAP_PUSH_TOKEN: op://Apple Signing/Homebrew Tap Push Token/token
+
+      - name: Build (unsigned Release)
+        run: just build-mac
+
+      - name: Import Developer ID cert into temp keychain
+        run: |
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 -d > cert.p12
+          security import cert.p12 -k "$KEYCHAIN" -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f cert.p12
+          security set-key-partition-list -S "apple-tool:,apple:" \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+      - name: Codesign (hardened runtime)
+        run: |
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          [ -n "$IDENTITY" ] || { echo "no Developer ID identity in keychain"; exit 1; }
+          # Deep-sign inside-out: nested code (frameworks, dylibs, XPC services,
+          # helper apps) first, then the outer bundle. No-op when none exist.
+          find "build/$APP.app/Contents" -depth \
+            \( -name "*.framework" -o -name "*.dylib" -o -name "*.xpc" -o -name "*.app" \) \
+            -print0 | while IFS= read -r -d '' ITEM; do
+              codesign --force --options runtime --timestamp --sign "$IDENTITY" "$ITEM"
+            done
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" "build/$APP.app"
+          codesign --verify --deep --strict --verbose=2 "build/$APP.app"
+
+      - name: Notarize and staple
+        run: |
+          ditto -c -k --keepParent "build/$APP.app" "build/$APP-notarize.zip"
+          printf '%s' "$ASC_KEY_P8_BASE64" | base64 -d > asc.p8
+          chmod 600 asc.p8
+          xcrun notarytool submit "build/$APP-notarize.zip" \
+            --key asc.p8 --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+            --wait
+          rm -f asc.p8
+          xcrun stapler staple "build/$APP.app"
+          # Re-zip the stapled app — this is the release asset the cask installs.
+          ditto -c -k --keepParent "build/$APP.app" "build/$APP-$GITHUB_REF_NAME.zip"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "build/$APP-$GITHUB_REF_NAME.zip" \
+            --generate-notes
+
+      - name: Bump Homebrew cask
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA256=$(shasum -a 256 "build/$APP-$GITHUB_REF_NAME.zip" | awk '{print $1}')
+          git clone "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/alexjmiller5/homebrew-tap.git" tap
+          cat > "tap/Casks/offline-shazam.rb" <<EOF
+          cask "offline-shazam" do
+            version "$VERSION"
+            sha256 "$SHA256"
+
+            url "https://github.com/$GITHUB_REPOSITORY/releases/download/v#{version}/$APP-v#{version}.zip"
+            name "$APP"
+            desc "Identify music with ShazamKit, offline too, and send it to Spotify through Music Sync"
+            homepage "https://github.com/$GITHUB_REPOSITORY"
+
+            app "$APP.app"
+          end
+          EOF
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Casks/offline-shazam.rb"
+          git commit -m "$APP $VERSION"
+          git push
+
+      - name: Delete temp keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN" || true

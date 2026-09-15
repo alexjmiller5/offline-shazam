@@ -1,3 +1,4 @@
+#if os(iOS)
 import SwiftData
 import UserNotifications
 import XCTest
@@ -247,3 +248,4 @@ private final class NotificationPresentation: NSObject, UNUserNotificationCenter
         completionHandler([.list])
     }
 }
+#endif

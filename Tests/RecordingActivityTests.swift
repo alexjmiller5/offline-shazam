@@ -1,3 +1,4 @@
+#if os(iOS)
 import ActivityKit
 import ShazamKit
 import XCTest
@@ -116,3 +117,4 @@ final class RecordingActivityTests: XCTestCase {
         await previous.end()
     }
 }
+#endif

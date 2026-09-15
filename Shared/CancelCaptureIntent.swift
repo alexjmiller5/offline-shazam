@@ -1,7 +1,13 @@
 import AppIntents
 import Foundation
 
-struct CancelCaptureIntent: LiveActivityIntent {
+#if os(iOS)
+typealias CancelCaptureIntentKind = LiveActivityIntent
+#else
+typealias CancelCaptureIntentKind = AppIntent
+#endif
+
+struct CancelCaptureIntent: CancelCaptureIntentKind {
     static var title: LocalizedStringResource = "Cancel song capture"
     static var openAppWhenRun = false
     static var isDiscoverable = false

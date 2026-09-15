@@ -79,10 +79,12 @@ final class AudioRecorder {
         }
         guard allowed else { throw CaptureError.microphoneDenied }
         try Task.checkCancellation()
+        #if os(iOS)
         let audioSession = AVAudioSession.sharedInstance()
         defer { try? audioSession.setActive(false, options: .notifyOthersOnDeactivation) }
         try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker])
         try audioSession.setActive(true)
+        #endif
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -115,10 +117,9 @@ final class AudioRecorder {
         let id = UUID()
         recordingID = id
         let observer = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), queue: .main
+            forName: Self.interruptionNotification, object: nil, queue: .main
         ) { [weak self] notification in
-            guard let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  type == AVAudioSession.InterruptionType.began.rawValue else { return }
+            guard Self.isInterruptionBegan(notification) else { return }
             MainActor.assumeIsolated { self?.finish(id: id, stream: stream, error: CaptureError.recordingInterrupted) }
         }
         defer {
@@ -145,6 +146,17 @@ final class AudioRecorder {
             Task { @MainActor in self.finish(id: id, stream: stream, error: CancellationError()) }
         }
     }
+
+    #if os(iOS)
+    static let interruptionNotification = AVAudioSession.interruptionNotification
+    static func isInterruptionBegan(_ notification: Notification) -> Bool {
+        (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.began.rawValue
+    }
+    #else
+    // macOS has no audio session; engine configuration changes are the equivalent interruption.
+    static let interruptionNotification = Notification.Name.AVAudioEngineConfigurationChange
+    static func isInterruptionBegan(_ notification: Notification) -> Bool { true }
+    #endif
 
     private func finish(id: UUID, stream: StreamingAudio, error: Error? = nil) {
         guard recordingID == id, let continuation else { return }
