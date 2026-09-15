@@ -75,8 +75,15 @@ jobs:
             -print0 | while IFS= read -r -d '' ITEM; do
               codesign --force --options runtime --timestamp --sign "$IDENTITY" "$ITEM"
             done
-          codesign --force --options runtime --timestamp --sign "$IDENTITY" "build/$APP.app"
+          # The unsigned build carries no entitlements; the microphone one must
+          # be applied here or ShazamKit never hears anything.
+          codesign --force --options runtime --timestamp \
+            --entitlements "Mac/OfflineShazam.entitlements" \
+            --sign "$IDENTITY" "build/$APP.app"
           codesign --verify --deep --strict --verbose=2 "build/$APP.app"
+          codesign -d --entitlements - "build/$APP.app" 2>/dev/null \
+            | grep -q "com.apple.security.device.audio-input" \
+            || { echo "microphone entitlement missing after re-sign"; exit 1; }
 
       - name: Notarize and staple
         run: |
