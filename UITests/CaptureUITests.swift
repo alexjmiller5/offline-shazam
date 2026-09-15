@@ -36,7 +36,7 @@ final class CaptureUITests: XCTestCase {
         let endpoint = app.textFields["Capture URL"]
         XCTAssertTrue(endpoint.waitForExistence(timeout: 3))
         replaceText(in: endpoint, with: "https://example.invalid/capture", app: app)
-        let token = app.textFields["Access token"]
+        let token = app.secureTextFields["Access token"]
         replaceText(in: token, with: "test-token", app: app)
         app.buttons["Save connection"].tap()
         XCTAssertTrue(app.staticTexts["Connection saved on this iPhone."].waitForExistence(timeout: 3))
@@ -57,7 +57,7 @@ final class CaptureUITests: XCTestCase {
         let endpoint = app.textFields["Capture URL"]
         XCTAssertTrue(endpoint.waitForExistence(timeout: 3))
         replaceText(in: endpoint, with: "http://example.com/capture", app: app)
-        let token = app.textFields["Access token"]
+        let token = app.secureTextFields["Access token"]
         replaceText(in: token, with: "test-token", app: app)
         app.buttons["Save connection"].tap()
         XCTAssertTrue(app.staticTexts["Enter the HTTPS capture URL from Music Sync, without login details or query parameters."].waitForExistence(timeout: 3))

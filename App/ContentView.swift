@@ -207,8 +207,7 @@ private struct SettingsView: View {
                     TextField("Capture URL", text: $endpoint)
                         .keyboardType(.URL).textContentType(.URL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    TextField("Access token", text: $token)
-                        .font(.footnote.monospaced())
+                    SecureField("Access token", text: $token)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                     HStack(spacing: 8) {
                         Image(connectionIsSaved ? "CircleCheck" : "AlertCircle")
