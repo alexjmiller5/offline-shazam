@@ -46,6 +46,12 @@ final class IntegrationTests: XCTestCase {
         }
         XCTAssertThrowsError(try DeliveryConfiguration(endpoint: "https://example.com/capture", token: "\n"))
         XCTAssertThrowsError(try DeliveryConfiguration(endpoint: "https://example.com/capture", token: "secret\nInjected: header"))
+        XCTAssertThrowsError(try DeliveryConfiguration(endpoint: "https://example.com/capture", token: "tok\u{200B}en")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("position 4: U+200B"), error.localizedDescription)
+        }
+        XCTAssertThrowsError(try DeliveryConfiguration(endpoint: "https://example.com/capture", token: "  ")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("empty"), error.localizedDescription)
+        }
         let config = try DeliveryConfiguration(endpoint: " https://example.com/capture ", token: "token")
         XCTAssertEqual(config.endpoint.absoluteString, "https://example.com/capture")
     }

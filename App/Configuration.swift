@@ -12,9 +12,11 @@ struct DeliveryConfiguration: Codable {
             throw ConfigurationError.invalidEndpoint
         }
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 512,
-              trimmed.unicodeScalars.allSatisfy({ $0.value >= 33 && $0.value <= 126 }) else {
-            throw ConfigurationError.invalidToken
+        guard !trimmed.isEmpty else { throw ConfigurationError.invalidToken("The token field is empty.") }
+        guard trimmed.count <= 512 else { throw ConfigurationError.invalidToken("The token is longer than 512 characters.") }
+        if let bad = trimmed.unicodeScalars.first(where: { $0.value < 33 || $0.value > 126 }) {
+            throw ConfigurationError.invalidToken(
+                "It contains an unsupported character at position \(trimmed.unicodeScalars.distance(from: trimmed.unicodeScalars.startIndex, to: trimmed.unicodeScalars.firstIndex(of: bad)!) + 1): U+\(String(bad.value, radix: 16, uppercase: true)).")
         }
         self.endpoint = url
         self.token = trimmed
@@ -28,11 +30,11 @@ struct DeliveryConfiguration: Codable {
 }
 
 enum ConfigurationError: LocalizedError {
-    case invalidEndpoint, invalidToken, keychain(OSStatus)
+    case invalidEndpoint, invalidToken(String), keychain(OSStatus)
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint: return "Enter the HTTPS capture URL from Music Sync, without login details or query parameters."
-        case .invalidToken: return "Enter a valid capture access token from Music Sync."
+        case .invalidToken(let reason): return "Enter a valid capture access token from Music Sync. " + reason
         case .keychain: return "Could not access the saved connection. Unlock the phone and try again."
         }
     }
