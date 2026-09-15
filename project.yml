@@ -5,6 +5,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
+    APP_BUNDLE_IDENTIFIER: com.alexmiller.offline-shazam
   configs:
     debug:
       ONLY_ACTIVE_ARCH: YES
@@ -13,11 +14,12 @@ targets:
   OfflineShazam:
     type: application
     platform: iOS
-    sources: [App]
+    sources: [App, Shared]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.alexmiller.offline-shazam
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER)
         PRODUCT_NAME: OfflineShazam
+        PROVISIONING_PROFILE_SPECIFIER: $(IOS_APP_PROFILE)
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
     info:
@@ -26,14 +28,36 @@ targets:
         CFBundleDisplayName: Offline Shazam
         UILaunchScreen: {}
         NSMicrophoneUsageDescription: Record a short clip to identify music, including when offline.
+        NSSupportsLiveActivities: true
+        UIBackgroundModes: [audio]
         ITSAppUsesNonExemptEncryption: false
+    dependencies:
+      - target: OfflineShazamActivity
+  OfflineShazamActivity:
+    type: app-extension
+    platform: iOS
+    sources: [Widgets, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER).activity
+        PRODUCT_NAME: OfflineShazamActivity
+        PROVISIONING_PROFILE_SPECIFIER: $(IOS_ACTIVITY_PROFILE)
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WIDGET_EXTENSION"
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Song Capture
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
   OfflineShazamTests:
     type: bundle.unit-test
     platform: iOS
     sources: [Tests]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.alexmiller.offline-shazam.tests
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER).tests
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: OfflineShazam
@@ -43,7 +67,7 @@ targets:
     sources: [UITests]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.alexmiller.offline-shazam.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER).uitests
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: OfflineShazam

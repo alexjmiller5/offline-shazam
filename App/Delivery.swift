@@ -8,10 +8,12 @@ final class DeliveryService: NSObject, URLSessionDataDelegate {
     let sessionConfiguration: URLSessionConfiguration
     let retryDelay: TimeInterval
     var onChange: (() -> Void)?
+    var onRecordsChanged: (() async -> Void)?
     var backgroundCompletion: (() -> Void)?
     private(set) var connectionIssue: String?
     private(set) var uploadingIDs: Set<UUID> = []
     private var responses: [Int: Data] = [:]
+    private var completionWork: Task<Void, Never>?
     private var currentConfiguration: DeliveryConfiguration?
     private var enqueuing = false
     private var enqueueAgain = false
@@ -19,6 +21,9 @@ final class DeliveryService: NSObject, URLSessionDataDelegate {
     private var supersededTaskIDs: Set<Int> = []
     private var retryTask: Task<Void, Never>?
     private var invalidated = false
+    private var checkingConnection = false
+    private var nextConnectionCheck = Date.distantPast
+    private(set) var connectionVerified = false
     lazy var session = URLSession(configuration: sessionConfiguration, delegate: self, delegateQueue: .main)
 
     init(store: CaptureStore, uploadDirectory: URL, connection: @escaping () throws -> DeliveryConfiguration?,
@@ -33,7 +38,7 @@ final class DeliveryService: NSObject, URLSessionDataDelegate {
             currentConfiguration = try connection()
             if currentConfiguration == nil { connectionIssue = "Connect Music Sync in Settings to add songs to Spotify." }
             else if try store.records().contains(where: { $0.state == .matched && $0.deliveryBlocked }) {
-                connectionIssue = "Connection needs attention in Settings."
+                connectionIssue = ConnectionCheckError.rejected.localizedDescription
             }
         } catch { connectionIssue = error.localizedDescription }
     }
@@ -65,7 +70,7 @@ final class DeliveryService: NSObject, URLSessionDataDelegate {
             }
             let records = try store.records().filter { $0.state == .matched }
             guard !records.contains(where: \.deliveryBlocked) else {
-                connectionIssue = "Connection needs attention in Settings."
+                connectionIssue = ConnectionCheckError.rejected.localizedDescription
                 return
             }
             connectionIssue = nil
@@ -96,8 +101,48 @@ final class DeliveryService: NSObject, URLSessionDataDelegate {
         }
     }
 
+    // Recheck a durable auth pause on explicit app/Shortcut use. A stale failure
+    // must not indefinitely block a now-valid connection and all newer songs.
+    func recoverConnection() async {
+        guard !checkingConnection, !changingConnection, Date() >= nextConnectionCheck,
+              (try? store.records().contains(where: { $0.state == .matched && $0.deliveryBlocked })) == true else { return }
+        _ = await verifyConnection()
+    }
+
+    @discardableResult
+    func verifyConnection() async -> Bool {
+        guard !checkingConnection else { return connectionVerified }
+        checkingConnection = true
+        nextConnectionCheck = Date().addingTimeInterval(60)
+        defer { checkingConnection = false; onChange?() }
+        do {
+            guard let configuration = try connection() else {
+                connectionIssue = "Connect Music Sync in Settings to add songs to Spotify."
+                connectionVerified = false
+                return false
+            }
+            let checkConfiguration = URLSessionConfiguration.ephemeral
+            checkConfiguration.protocolClasses = sessionConfiguration.protocolClasses
+            try await ConnectionVerifier().verify(configuration, sessionConfiguration: checkConfiguration)
+            // A settings save may replace credentials while the check is in flight.
+            guard let latest = try connection(), latest.endpoint == configuration.endpoint,
+                  latest.token == configuration.token else { return false }
+            connectionVerified = true
+            connectionIssue = nil
+            if try store.records().contains(where: { $0.state == .matched && $0.deliveryBlocked }) {
+                try await connectionChanged()
+            }
+            return true
+        } catch {
+            connectionVerified = false
+            connectionIssue = error.localizedDescription
+            return false
+        }
+    }
+
     func connectionChanged() async throws {
         changingConnection = true
+        nextConnectionCheck = .distantPast
         currentConfiguration = nil
         retryTask?.cancel()
         retryTask = nil
@@ -170,7 +215,12 @@ final class DeliveryService: NSObject, URLSessionDataDelegate {
                                                retryDelay: retryDelay)
                 }
                 try? FileManager.default.removeItem(at: uploadFile(id))
-                Task { try? await enqueue() }
+                let previous = completionWork
+                completionWork = Task {
+                    await previous?.value
+                    await onRecordsChanged?()
+                    try? await enqueue()
+                }
             } catch {
                 connectionIssue = "Could not update delivery. Your song is saved for another attempt."
                 scheduleRetry(at: Date().addingTimeInterval(retryDelay))
@@ -196,7 +246,10 @@ final class DeliveryService: NSObject, URLSessionDataDelegate {
         MainActor.assumeIsolated {
             let completion = backgroundCompletion
             backgroundCompletion = nil
-            completion?()
+            Task {
+                await completionWork?.value
+                completion?()
+            }
         }
     }
 }

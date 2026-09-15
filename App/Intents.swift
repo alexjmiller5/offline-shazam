@@ -1,17 +1,30 @@
 import AppIntents
 import UniformTypeIdentifiers
 
-struct CaptureSongIntent: AppIntent {
+struct CaptureSongIntent: LiveActivityIntent, ForegroundContinuableIntent {
     static var title: LocalizedStringResource = "Capture song"
     static var description = IntentDescription("Identify music as you listen, or save an offline capture for automatic identification on your next online use.")
-    static var openAppWhenRun = true
+    static var openAppWhenRun = false
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
-        _ = try await Runtime.controller.get().capture()
+        let requiresLiveActivity: Bool
+        if #available(iOS 18, *) { requiresLiveActivity = true }
+        else {
+            try await requestToContinueInForeground()
+            requiresLiveActivity = false
+        }
+        do {
+            _ = try await Runtime.controller.get().capture(requiresLiveActivity: requiresLiveActivity)
+        } catch is CancellationError {
+            return .result(value: "Capture canceled")
+        }
         return .result(value: "Capture saved")
     }
 }
+
+@available(iOS 18, *)
+extension CaptureSongIntent: AudioRecordingIntent {}
 
 struct ImportAudioIntent: AppIntent {
     static var title: LocalizedStringResource = "Save audio capture"

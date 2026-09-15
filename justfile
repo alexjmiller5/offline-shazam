@@ -18,5 +18,5 @@ build: gen
     xcodebuild -quiet -project {{app}}.xcodeproj -scheme {{app}} -derivedDataPath "{{derived}}" -destination "generic/platform=iOS" -configuration Debug -allowProvisioningUpdates DEVELOPMENT_TEAM="${IOS_TEAM_ID:?Set IOS_TEAM_ID}" build
 
 deploy: gen
-    xcodebuild -quiet -project {{app}}.xcodeproj -scheme {{app}} -derivedDataPath "{{derived}}" -destination "generic/platform=iOS" -configuration Release DEVELOPMENT_TEAM="${IOS_TEAM_ID:?Set IOS_TEAM_ID}" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="${IOS_PROFILE:?Set IOS_PROFILE}" build
+    xcodebuild -quiet -project {{app}}.xcodeproj -scheme {{app}} -derivedDataPath "{{derived}}" -destination "generic/platform=iOS" -configuration Release DEVELOPMENT_TEAM="${IOS_TEAM_ID:?Set IOS_TEAM_ID}" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" IOS_APP_PROFILE="${IOS_PROFILE:?Set IOS_PROFILE}" IOS_ACTIVITY_PROFILE="${IOS_ACTIVITY_PROFILE:?Set IOS_ACTIVITY_PROFILE}" build
     xcrun devicectl device install app --device "${IOS_DEVICE_ID:?Set IOS_DEVICE_ID}" "{{derived}}/Build/Products/Release-iphoneos/{{app}}.app"

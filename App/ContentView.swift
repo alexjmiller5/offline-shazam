@@ -35,15 +35,21 @@ struct ContentView: View {
                     }
 
                     Button {
+                        if controller.isRecording {
+                            controller.cancelCapture()
+                            error = nil
+                            return
+                        }
                         Task {
                             do { _ = try await controller.capture(); error = nil }
+                            catch is CancellationError { error = nil }
                             catch let captureError as CaptureError { error = captureError.localizedDescription }
                             catch { self.error = "Could not save this capture. Please try again." }
                         }
                     } label: {
                         VStack(spacing: 12) {
                             Image("Waveform").resizable().scaledToFit().frame(width: 76, height: 76)
-                            Text(controller.isRecording ? "Listening…" : "Capture song")
+                            Text(controller.isRecording ? "Cancel capture" : "Capture song")
                                 .font(.title3.weight(.semibold))
                             Text(controller.isRecording
                                  ? (controller.isOnline ? "Listening for a Shazam match" : "Saving an offline capture")
@@ -55,8 +61,7 @@ struct ContentView: View {
                         .background(blue.gradient, in: RoundedRectangle(cornerRadius: 36))
                     }
                     .buttonStyle(.plain)
-                    .disabled(controller.isRecording)
-                    .accessibilityLabel("Capture song")
+                    .accessibilityLabel(controller.isRecording ? "Cancel capture" : "Capture song")
                     .accessibilityValue(controller.isRecording ? "Listening" : "Ready")
 
                     VStack(spacing: 8) {
@@ -104,7 +109,11 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $showingSettings) { SettingsView(controller: controller) }
-            .task { controller.refresh(); await resumeAfterActivation() }
+            .task {
+                controller.refresh()
+                _ = await Runtime.notifications.requestAuthorization()
+                await resumeAfterActivation()
+            }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { Task { await resumeAfterActivation() } }
             }
@@ -158,7 +167,8 @@ private struct CaptureRow: View {
         switch record.state {
         case .pending: return "Saved for identification"
         case .matched:
-            if connectionIssue != nil { return "Needs connection" }
+            if !isOnline { return "Waiting for internet" }
+            if connectionIssue != nil { return "Check Music Sync" }
             if isUploading { return isOnline ? "Sending to Spotify…" : "Waiting for internet" }
             return record.nextAttemptAt == nil ? "Queued for Spotify" : "Will retry automatically"
         case .delivered: return "Added to Spotify"
@@ -188,6 +198,7 @@ private struct SettingsView: View {
     @State private var token = ""
     @State private var message: String?
     @State private var savedConnection: DeliveryConfiguration?
+    @State private var isChecking = false
 
     var body: some View {
         NavigationStack {
@@ -215,12 +226,20 @@ private struct SettingsView: View {
                             try Runtime.connection.save(configuration)
                             savedConnection = configuration
                             message = "Connection saved."
+                            isChecking = true
                             Task {
-                                do { try await controller.delivery.connectionChanged(); await controller.resume() }
-                                catch { message = "Connection saved. Pending songs will retry on your next use." }
+                                do { try await controller.delivery.connectionChanged() }
+                                catch { message = "Connection saved. Your songs will retry automatically." }
+                                let verified = await controller.delivery.verifyConnection()
+                                message = verified ? "Connected to Music Sync. Waiting songs are sending automatically."
+                                    : controller.delivery.connectionIssue
+                                isChecking = false
+                                await controller.resume()
                             }
                         } catch { message = error.localizedDescription }
                     }
+                    .disabled(isChecking)
+                    if isChecking { ProgressView("Checking Music Sync…").font(.footnote) }
                     if let message { Text(message).font(.footnote) }
                 }
                 Section("Offline captures") {

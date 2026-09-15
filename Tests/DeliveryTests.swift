@@ -12,6 +12,81 @@ final class DeliveryTests: XCTestCase {
         super.tearDown()
     }
 
+    func testResumeChecksBlockedCredentialsAndSendsAllWaitingSongs() async throws {
+        let fixture = try DeliveryFixture()
+        defer { fixture.cleanUp() }
+        try fixture.store.deliveryFinished(fixture.record, status: 401, data: Data())
+        let newer = try fixture.store.capture(signature: SHSignatureGenerator().signature())
+        try fixture.store.matched(newer, metadata: MatchMetadata(title: "New Song", artist: "Example Artist"))
+        let controller = CaptureController(store: fixture.store, delivery: fixture.service,
+            recordAudio: { throw CaptureError.microphoneDenied }, recognize: { _ in nil })
+        let accepted = Data("{\"ok\":false,\"message\":\"capture requires capture_id, title, artist, apple_music_id and shazam_url; isrc is optional\"}".utf8)
+        var checks = 0
+        var uploads = 0
+        CaptureHTTPStub.response = { request in
+            if request.httpBody == Data("{}".utf8) {
+                checks += 1
+                return (422, [:], accepted)
+            }
+            uploads += 1
+            // Upload order follows capture creation order.
+            let id = uploads == 1 ? fixture.record.id : newer.id
+            return (200, [:], Data("{\"ok\":true,\"capture_id\":\"\(id)\",\"isrc\":\"XX0000000001\"}".utf8))
+        }
+        let confirmed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            fixture.record.state == .delivered && newer.state == .delivered
+        }, object: nil)
+        await controller.resume()
+        await fulfillment(of: [confirmed], timeout: 3)
+        XCTAssertEqual(checks, 1)
+        XCTAssertEqual(uploads, 2)
+        XCTAssertNil(controller.connectionIssue)
+    }
+
+    func testConnectionProbeRequiresAuthenticatedMusicSyncValidationAndNeverACapture() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CaptureHTTPStub.self]
+        let connection = try DeliveryConfiguration(endpoint: "https://example.com/capture", token: "test-token")
+        var requests = 0
+        CaptureHTTPStub.response = { request in
+            requests += 1
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.httpBody, Data("{}".utf8))
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
+            return (422, [:], Data("{\"ok\":false,\"message\":\"an unrelated validation error\"}".utf8))
+        }
+        do {
+            try await ConnectionVerifier().verify(connection, sessionConfiguration: configuration)
+            XCTFail("An arbitrary 422 must not claim credentials were accepted")
+        } catch ConnectionCheckError.wrongEndpoint {}
+        CaptureHTTPStub.response = { _ in (401, [:], Data()) }
+        do {
+            try await ConnectionVerifier().verify(connection, sessionConfiguration: configuration)
+            XCTFail("Rejected credentials must remain rejected")
+        } catch ConnectionCheckError.rejected {}
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testRejectedCredentialsAreRecheckedWithoutResubmittingSongs() async throws {
+        let fixture = try DeliveryFixture()
+        defer { fixture.cleanUp() }
+        try fixture.store.deliveryFinished(fixture.record, status: 401, data: Data())
+        let controller = CaptureController(store: fixture.store, delivery: fixture.service,
+            recordAudio: { throw CaptureError.microphoneDenied }, recognize: { _ in nil })
+        var checks = 0
+        CaptureHTTPStub.response = { request in
+            checks += 1
+            XCTAssertEqual(request.httpBody, Data("{}".utf8))
+            return (401, [:], Data())
+        }
+        await controller.resume()
+        await controller.resume()
+        XCTAssertEqual(checks, 1, "Repeated callbacks must not hammer a rejected credential")
+        XCTAssertTrue(fixture.record.deliveryBlocked)
+        XCTAssertTrue(controller.connectionIssue?.contains("token") == true)
+        XCTAssertTrue(controller.uploadingIDs.isEmpty)
+    }
+
     func testMissingConnectionIsVisibleAndCaptureStaysDurable() async throws {
         let fixture = try DeliveryFixture(connection: { nil })
         defer { fixture.cleanUp() }
@@ -355,6 +430,20 @@ final class CaptureHTTPStub: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         if let begin = Self.begin { begin(self); return }
+        // URLSession hands protocols an in-memory body as a stream, never as httpBody.
+        var request = request
+        if request.httpBody == nil, let stream = request.httpBodyStream {
+            var body = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            stream.open()
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                body.append(buffer, count: count)
+            }
+            stream.close()
+            request.httpBody = body
+        }
         let result = Self.response?(request) ?? (200, [:], Self.reply?(request) ?? Data())
         complete(status: result.0, headers: result.1, data: result.2)
     }

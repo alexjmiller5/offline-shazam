@@ -8,20 +8,22 @@ Native SwiftUI app for iOS 17+. Uses Apple ShazamKit to identify music while lis
 
 Run `just test` for real ShazamKit custom-catalog matching, durable queue behavior, Keychain, URLSession, and UI coverage. Simulator tests use local ad hoc signing so Keychain access has an application identity. `just check` builds without a developer account. Production Shazam catalog access and microphone behavior still need a provisioned phone smoke test.
 
-Device signing and installation use caller-supplied `IOS_TEAM_ID`, `IOS_PROFILE`, and `IOS_DEVICE_ID`. ShazamKit must be enabled as an App ID service in the Apple Developer account; it does not use a `com.apple.developer.shazamkit` entitlement. There is no deployment workflow; `just deploy` is the explicit local Ad Hoc build/install interface. Native account sign-in and microphone permission remain user state.
+Device signing and installation use caller-supplied `IOS_TEAM_ID`, `IOS_PROFILE`, `IOS_ACTIVITY_PROFILE`, and `IOS_DEVICE_ID`. The main app and embedded `.activity` extension need matching Distribution certificate/team/device profiles. A wildcard profile can sign the extension. `APP_BUNDLE_IDENTIFIER` derives both bundle identifiers; widget Info.plist is generated and ignored. ShazamKit must be enabled as an App ID service in the Apple Developer account; it does not use a `com.apple.developer.shazamkit` entitlement. There is no deployment workflow; `just deploy` is the explicit local Ad Hoc build/install interface. Native account sign-in and microphone permission remain user state.
 
 ## Queue invariants
 
 - Start a new capture promptly; backlog work must not delay recording.
 - Feed microphone audio to native ShazamKit streaming recognition while generating the offline signature from the same audio. Stop early on a match; retain useful audio if recognition fails or connectivity drops.
 - Persist the signature file and SwiftData record before saying saved.
-- Await recognition within the app or App Intent lifetime. Never start detached recognition and return from an intent.
+- Await recognition within the app or App Intent lifetime. Never start detached recognition and return from an intent. iOS 18+ capture conforms to AudioRecordingIntent and LiveActivityIntent; its ActivityKit recording activity must exist throughout microphone use. The widget shares only activity/intent declarations, never credentials or queue state. iOS 17 uses foreground continuation.
+- Explicit capture cancellation discards the current recording before persistence. System/lifetime cancellation still retains useful audio. Stale Live Activity cancel actions are scoped by recording UUID.
 - Bound a recognition pass to three captures and a six-second timeout each. Prioritize the current capture, then previously unattempted work.
 - Persist a match before enqueueing a file-backed background URLSession upload. Reuse matched metadata on delivery retries.
 - Display and enqueue each match before slower backlog recognition. Current online identification and upload must not wait for a future invocation.
 - Mark delivered only after a valid response confirms the same capture UUID and recording. Retain all unfinished work through network, auth, and malformed-response failures.
-- Show missing connection, active upload, scheduled retry, and confirmed delivery separately. Saving a connection enqueues matched captures immediately. Retry persisted deadlines with one timer while the app can run, honoring Retry-After and a 30-second minimum; authentication failures pause until Settings repairs the connection.
-- Reattach the background URLSession on OS relaunch and finish the OS callback after persistence.
+- Show missing connection, active upload, scheduled retry, and confirmed delivery separately. Saving a connection enqueues matched captures immediately. Retry persisted deadlines with one timer while the app can run, honoring Retry-After and a 30-second minimum; authentication failures are rechecked on app/Shortcut use, and verified credentials clear stale blocked flags. Enrollment uses an empty capture payload to validate auth without Spotify effects; only the exact authenticated service validation response counts as a successful check.
+- Reattach the background URLSession on OS relaunch and finish the OS callback after persistence and notification scheduling. User force quit cancels transfers; explicit subsequent Shortcut/app invocation restores the queue. Do not promise passive reconnect bypasses force quit.
+- Notifications use one identifier per capture, a 10-second recognition grace period, and confirmed-delivery replacement. A delayed confirmation replaces that card and alerts again. Persist notification scheduling state; avoid historical-delivery notification floods and keep delivery working if notification authorization is denied.
 
 ## Ownership and configuration
 

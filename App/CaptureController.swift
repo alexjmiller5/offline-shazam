@@ -8,6 +8,7 @@ final class CaptureController {
     let delivery: DeliveryService
     let recordAudio: () async throws -> CapturedAudio
     let processor: CaptureProcessor
+    let recordingActivity: RecordingActivity?
     var isOnline = true
     var isRecording = false
     var isProcessing = false
@@ -15,35 +16,76 @@ final class CaptureController {
     var status: String?
     var connectionIssue: String?
     var uploadingIDs: Set<UUID> = []
+    @ObservationIgnored var onRecordsChanged: (() async -> Void)?
     @ObservationIgnored private var processingTask: Task<Void, Never>?
     @ObservationIgnored private var processingID: UUID?
+    @ObservationIgnored private var recordingTask: Task<CapturedAudio, Error>?
+    @ObservationIgnored private var recordingID: UUID?
+    @ObservationIgnored private var discardRecording = false
 
     init(store: CaptureStore, delivery: DeliveryService,
          recordAudio: @escaping () async throws -> CapturedAudio,
-         recognize: @escaping (Data) async throws -> MatchMetadata?) {
+         recognize: @escaping (Data) async throws -> MatchMetadata?,
+         recordingActivity: RecordingActivity? = nil) {
         self.store = store
         self.delivery = delivery
         self.recordAudio = recordAudio
+        self.recordingActivity = recordingActivity
         processor = CaptureProcessor(store: store, recognize: recognize)
         delivery.onChange = { [weak self] in self?.refresh() }
         refresh()
     }
 
-    func capture() async throws -> CaptureRecord {
+    func capture(requiresLiveActivity: Bool = false) async throws -> CaptureRecord {
         guard !isRecording else { throw CaptureError.alreadyRecording }
         status = nil
         processingTask?.cancel()
-        let record = try await recordAndSave()
+        let record = try await recordAndSave(requiresLiveActivity: requiresLiveActivity)
         status = "Capture saved."
         refresh()
         await resume(preferred: record.id)
         return record
     }
 
-    private func recordAndSave() async throws -> CaptureRecord {
+    func cancelCapture(id: UUID? = nil) {
+        guard isRecording, id == nil || id == recordingID else { return }
+        discardRecording = true
+        recordingTask?.cancel()
+        status = "Capture canceled."
+    }
+
+    private func recordAndSave(requiresLiveActivity: Bool) async throws -> CaptureRecord {
         isRecording = true
-        defer { isRecording = false }
-        let audio = try await recordAudio()
+        discardRecording = false
+        let id = UUID()
+        recordingID = id
+        defer {
+            isRecording = false
+            recordingTask = nil
+            recordingID = nil
+        }
+        let task = Task { @MainActor in
+            do {
+                if let recordingActivity {
+                    do { try await recordingActivity.start(id: id) }
+                    catch { if requiresLiveActivity { throw error } }
+                } else if requiresLiveActivity {
+                    throw RecordingActivityError.unavailable
+                }
+                try Task.checkCancellation()
+                let audio = try await recordAudio()
+                await recordingActivity?.end()
+                return audio
+            } catch {
+                await recordingActivity?.end()
+                throw error
+            }
+        }
+        recordingTask = task
+        let audio = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        // OS/lifetime cancellation may preserve useful audio. Only the user's
+        // explicit cancel action discards it before anything reaches the queue.
+        guard !discardRecording else { throw CancellationError() }
         let record = try store.capture(signature: audio.signature)
         if let metadata = audio.metadata { try store.matched(record, metadata: metadata) }
         return record
@@ -85,10 +127,12 @@ final class CaptureController {
         let task = Task { @MainActor in
             do {
                 try Task.checkCancellation()
+                async let recovery: Void = delivery.recoverConnection()
                 await enqueueMatches()
                 if isOnline {
                     try await processor.process(preferred: preferred) { await self.enqueueMatches() }
                 }
+                await recovery
             } catch is CancellationError {
                 // Cancellation leaves durable work for the next invocation.
             } catch {
@@ -107,6 +151,7 @@ final class CaptureController {
 
     private func enqueueMatches() async {
         refresh()
+        await onRecordsChanged?()
         do { try await delivery.enqueue() }
         catch { status = "Saved captures will continue on your next use." }
     }

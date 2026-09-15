@@ -5,6 +5,42 @@ import XCTest
 
 @MainActor
 final class ControllerTests: XCTestCase {
+    func testExplicitCancelDiscardsEmptyAndUsefulAudioAndAllowsAnotherCapture() async throws {
+        for seconds in [0, 2] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = try CaptureStore(directory: directory)
+            let older = try store.capture(signature: SHSignatureGenerator().signature())
+            let service = DeliveryService(store: store, uploadDirectory: directory.appendingPathComponent("uploads"),
+                connection: { nil }, sessionConfiguration: .ephemeral)
+            let recorder = AudioRecorder()
+            let started = expectation(description: "recording started with \(seconds) seconds")
+            var attempt = 0
+            var stopped = false
+            let controller = CaptureController(store: store, delivery: service, recordAudio: {
+                attempt += 1
+                if attempt == 2 { return CapturedAudio(signature: SHSignatureGenerator().signature()) }
+                let stream = StreamingAudio(session: try unrelatedStreamingSession())
+                return try await recorder.capture(using: stream, start: {
+                    if seconds > 0 { try stream.append(streamingFixture(seconds: seconds), at: nil) }
+                    started.fulfill()
+                }, stop: { stopped = true }, timeout: .milliseconds(200))
+            }, recognize: { _ in nil })
+            controller.isOnline = false
+            let capture = Task { @MainActor in _ = try await controller.capture() }
+            await fulfillment(of: [started], timeout: 1)
+            controller.cancelCapture()
+            do { _ = try await capture.value; XCTFail("Explicit cancellation must discard even useful audio") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertTrue(stopped)
+            XCTAssertFalse(controller.isRecording)
+            XCTAssertEqual(try CaptureStore(directory: directory).records().map(\.id), [older.id])
+            _ = try await controller.capture()
+            XCTAssertEqual(try store.records().count, 2)
+            service.session.finishTasksAndInvalidate()
+        }
+    }
+
     func testCanceledCaptureKeepsItsAudioAndRetriesAutomaticallyOnNextUse() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

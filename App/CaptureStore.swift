@@ -21,6 +21,9 @@ final class CaptureRecord {
     var nextAttemptAt: Date?
     var lastAttemptAt: Date?
     var deliveryBlocked: Bool = false
+    var notificationEligible: Bool = false
+    var recognitionNotificationDate: Date?
+    var deliveryNotificationScheduled: Bool = false
 
     var state: CaptureState {
         get { CaptureState(rawValue: stateValue) ?? .pending }
@@ -93,6 +96,7 @@ final class CaptureStore {
         record.appleMusicURL = metadata.appleMusicURL
         record.isrc = metadata.isrc?.replacingOccurrences(of: "-", with: "").uppercased()
         record.state = .matched
+        record.notificationEligible = true
         record.lastError = nil
         record.nextAttemptAt = nil
         record.deliveryBlocked = false

@@ -86,3 +86,55 @@ struct ConnectionStore {
         guard status == errSecSuccess else { throw ConfigurationError.keychain(status) }
     }
 }
+
+// The capture endpoint authenticates before validating payloads. An empty object
+// exercises that boundary without resolving or adding a Spotify track.
+final class ConnectionVerifier: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let acceptedMessage = "capture requires capture_id, title, artist, apple_music_id and shazam_url; isrc is optional"
+
+    func verify(_ connection: DeliveryConfiguration,
+                sessionConfiguration: URLSessionConfiguration = .ephemeral) async throws {
+        let session = URLSession(configuration: sessionConfiguration, delegate: self, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        var request = URLRequest(url: connection.endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer " + connection.token, forHTTPHeaderField: "Authorization")
+        request.httpBody = Data("{}".utf8)
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch let error as URLError {
+            if [.notConnectedToInternet, .networkConnectionLost, .dataNotAllowed].contains(error.code) {
+                throw ConnectionCheckError.offline
+            }
+            throw ConnectionCheckError.unavailable
+        }
+        guard let response = response as? HTTPURLResponse else { throw ConnectionCheckError.wrongEndpoint }
+        if response.statusCode == 401 || response.statusCode == 403 { throw ConnectionCheckError.rejected }
+        if response.statusCode >= 500 || response.statusCode == 429 { throw ConnectionCheckError.unavailable }
+        struct Rejection: Decodable { let ok: Bool; let message: String }
+        guard response.statusCode == 422,
+              let result = try? JSONDecoder().decode(Rejection.self, from: data),
+              !result.ok, result.message == Self.acceptedMessage else { throw ConnectionCheckError.wrongEndpoint }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
+enum ConnectionCheckError: LocalizedError {
+    case rejected, offline, unavailable, wrongEndpoint
+    var errorDescription: String? {
+        switch self {
+        case .rejected: return "Music Sync rejected this access token. Check the Capture URL and token in Settings."
+        case .offline: return "Waiting for internet. Your saved songs will retry automatically."
+        case .unavailable: return "Music Sync is temporarily unavailable. Your saved songs will retry automatically."
+        case .wrongEndpoint: return "This URL did not respond as a Music Sync capture endpoint. Check the Capture URL in Settings."
+        }
+    }
+}

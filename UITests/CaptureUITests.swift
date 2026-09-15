@@ -1,6 +1,34 @@
 import XCTest
 
 final class CaptureUITests: XCTestCase {
+    func testAccidentalCaptureCanBeCanceledAndStartedAgain() {
+        let app = XCUIApplication()
+        addUIInterruptionMonitor(withDescription: "Native capture permissions") { alert in
+            if alert.buttons["Allow"].exists { alert.buttons["Allow"].tap(); return true }
+            if alert.buttons["OK"].exists { alert.buttons["OK"].tap(); return true }
+            return false
+        }
+        app.launch()
+        let capture = app.buttons["Capture song"]
+        XCTAssertTrue(capture.waitForExistence(timeout: 5))
+        capture.tap()
+        // A harmless interaction lets the interruption monitor dismiss the microphone prompt.
+        app.navigationBars.firstMatch.tap()
+        let cancel = app.buttons["Cancel capture"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        cancel.tap()
+        XCTAssertTrue(app.staticTexts["Capture canceled."].waitForExistence(timeout: 3))
+        XCTAssertTrue(capture.waitForExistence(timeout: 3))
+        capture.tap()
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3))
+        let listening = XCTAttachment(screenshot: app.screenshot())
+        listening.name = "Cancellable recording"
+        listening.lifetime = .keepAlways
+        add(listening)
+        cancel.tap()
+        XCTAssertTrue(capture.waitForExistence(timeout: 3))
+    }
+
     func testSavedConnectionIsRestoredAfterRelaunch() {
         let app = XCUIApplication()
         app.launch()
@@ -11,7 +39,7 @@ final class CaptureUITests: XCTestCase {
         let token = app.secureTextFields["Access token"]
         replaceText(in: token, with: "test-token", app: app)
         app.buttons["Save connection"].tap()
-        XCTAssertTrue(app.staticTexts["Connection saved."].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Connection saved on this iPhone."].waitForExistence(timeout: 3))
         app.buttons["Done"].tap()
         app.terminate()
         app.launch()
